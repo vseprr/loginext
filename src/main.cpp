@@ -55,7 +55,7 @@ void on_event(const input_event& ev, void* ctx) {
             loginext::core::enqueue_action(app->pacer, result, ts);
         }
 
-        loginext::core::check_damping(app->pacer, ts);
+        loginext::core::check_damping(app->pacer, ts, app->emitter);
         return;
     }
 

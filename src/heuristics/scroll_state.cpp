@@ -38,14 +38,31 @@ ActionResult process_hwheel(ScrollState& state, int32_t value,
 
     // Idle reset: silence longer than idle_reset_ns starts a fresh gesture
     if (dt > p.idle_reset_ns) {
-        state.accumulator = 0;
-        state.direction   = 0;
+        state.accumulator   = 0;
+        state.direction     = 0;
+        state.reverse_count = 0;
     }
 
     const int8_t event_dir = sign(value);
-    if (event_dir != state.direction) {
-        state.accumulator = 0;
-        state.direction   = event_dir;
+
+    // Direction jitter debounce: the MX Master 3S free-spinning wheel can
+    // produce isolated reverse ticks when resting between notches. Tolerate
+    // up to reverse_tolerance consecutive reverse events before resetting.
+    if (event_dir != state.direction && state.direction != 0) {
+        state.reverse_count++;
+        if (state.reverse_count > p.reverse_tolerance) {
+            // Genuine direction change confirmed
+            state.accumulator   = 0;
+            state.direction     = event_dir;
+            state.reverse_count = 0;
+        } else {
+            // Jitter — absorb silently, do not alter direction or accumulator
+            state.last_event_ns = timestamp_ns;
+            return ActionResult::None;
+        }
+    } else {
+        state.reverse_count = 0;
+        if (state.direction == 0) state.direction = event_dir;
     }
 
     state.accumulator  += std::abs(value);
@@ -102,9 +119,14 @@ void tick_leak(ScrollState& state, int64_t now_ns, const config::Profile& p) noe
 
     int64_t elapsed = now_ns - state.last_event_ns;
     if (elapsed >= p.leak_interval_ns) {
-        int32_t drain = static_cast<int32_t>(elapsed / p.leak_interval_ns);
-        state.accumulator = std::max(0, state.accumulator - drain);
+        // Exponential decay: halve (or shift) the accumulator once per
+        // leak_interval_ns elapsed. Simulates natural momentum fade-out.
+        int64_t periods = elapsed / p.leak_interval_ns;
+        for (int64_t i = 0; i < periods && state.accumulator > 0; ++i) {
+            state.accumulator >>= p.leak_decay_shift;
+        }
     }
 }
 
 } // namespace loginext::heuristics
+

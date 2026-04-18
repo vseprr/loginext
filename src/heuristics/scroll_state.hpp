@@ -17,6 +17,7 @@ struct ScrollState {
     int32_t accumulator   = 0;    // leaky bucket counter
     int8_t  direction     = 0;    // -1, 0, +1
     int8_t  pending_dir   = 0;    // unconfirmed gesture-start direction
+    int8_t  reverse_count = 0;    // consecutive reverse-direction events (jitter debounce)
     int64_t last_event_ns = 0;    // monotonic timestamp of previous event
     int64_t last_emit_ns  = 0;    // monotonic timestamp of previous emit
     int64_t pending_ts    = 0;    // timestamp of unconfirmed gesture-start

@@ -14,14 +14,12 @@ struct EmitterHandle {
 // Create uinput devices: keyboard for tab switching, mouse for passthrough.
 [[nodiscard]] int init_emitter(EmitterHandle& em) noexcept;
 
-// Emit Ctrl+Tab keystroke sequence.
-void emit_tab_next(EmitterHandle& em) noexcept;
+// Two-phase keystroke emission: press modifiers+key down, then release later.
+// Phase 1: KEY_DOWN + SYN
+void emit_action_down(EmitterHandle& em, loginext::heuristics::ActionResult action) noexcept;
 
-// Emit Ctrl+Shift+Tab keystroke sequence.
-void emit_tab_prev(EmitterHandle& em) noexcept;
-
-// Emit an action result (dispatches to tab_next/tab_prev).
-void emit_action(EmitterHandle& em, loginext::heuristics::ActionResult action) noexcept;
+// Phase 2: KEY_UP + SYN
+void emit_action_up(EmitterHandle& em, loginext::heuristics::ActionResult action) noexcept;
 
 // Re-emit a raw input_event on the virtual mouse (passthrough).
 void emit_passthrough(EmitterHandle& em, const struct input_event& ev) noexcept;

@@ -21,6 +21,9 @@ struct Profile {
     int64_t damping_timeout_ns;
     int64_t leak_interval_ns;
     int64_t confirmation_window_ns;
+    int8_t  reverse_tolerance;      // consecutive reverse ticks to tolerate (jitter debounce)
+    int32_t leak_decay_shift;       // right-shift for exponential decay per leak_interval_ns
+    int64_t key_release_delay_ns;   // delay between KEY_DOWN and KEY_UP emission
 };
 
 inline constexpr Profile profile_low = {
@@ -34,6 +37,9 @@ inline constexpr Profile profile_low = {
     .damping_timeout_ns     = 200'000'000,
     .leak_interval_ns       = 150'000'000,
     .confirmation_window_ns = 80'000'000,
+    .reverse_tolerance      = 2,
+    .leak_decay_shift       = 1,
+    .key_release_delay_ns   = 2'000'000,
 };
 
 inline constexpr Profile profile_medium = {
@@ -47,6 +53,9 @@ inline constexpr Profile profile_medium = {
     .damping_timeout_ns     = 150'000'000,
     .leak_interval_ns       = 200'000'000,
     .confirmation_window_ns = 70'000'000,
+    .reverse_tolerance      = 1,
+    .leak_decay_shift       = 1,
+    .key_release_delay_ns   = 2'000'000,
 };
 
 inline constexpr Profile profile_high = {
@@ -60,6 +69,9 @@ inline constexpr Profile profile_high = {
     .damping_timeout_ns     = 120'000'000,
     .leak_interval_ns       = 200'000'000,
     .confirmation_window_ns = 60'000'000,
+    .reverse_tolerance      = 1,
+    .leak_decay_shift       = 1,
+    .key_release_delay_ns   = 1'500'000,
 };
 
 constexpr const Profile& profile_for(SensitivityMode m) noexcept {

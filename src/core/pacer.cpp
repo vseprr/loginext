@@ -10,12 +10,21 @@ namespace loginext::core {
 
 namespace {
 
+// Arm the pacer timer with the profile's pacing_interval_ns.
 void arm_timer(const PacingQueue& q) noexcept {
     itimerspec ts{};
     const int64_t ns = q.profile->pacing_interval_ns;
     ts.it_value.tv_sec  = ns / 1'000'000'000LL;
     ts.it_value.tv_nsec = ns % 1'000'000'000LL;
     timerfd_settime(q.timer_fd, 0, &ts, nullptr);
+}
+
+// Arm the pacer timer with an explicit nanosecond duration.
+void arm_timer_ns(int fd, int64_t ns) noexcept {
+    itimerspec ts{};
+    ts.it_value.tv_sec  = ns / 1'000'000'000LL;
+    ts.it_value.tv_nsec = ns % 1'000'000'000LL;
+    timerfd_settime(fd, 0, &ts, nullptr);
 }
 
 void disarm_timer(int fd) noexcept {
@@ -53,7 +62,9 @@ void enqueue_action(PacingQueue& q, loginext::heuristics::ActionResult action,
     q.tail = static_cast<uint8_t>((q.tail + 1) & mask);
     q.count++;
 
-    if (q.count == 1) {
+    // Only arm the pacing timer if nothing is in flight (no pending release,
+    // no other items already being paced).
+    if (q.count == 1 && !q.release_pending) {
         arm_timer(q);
     }
 }
@@ -68,6 +79,20 @@ void process_timer(PacingQueue& q, EmitterHandle& em) noexcept {
         return;  // spurious wake or error — do not process
     }
 
+    // Phase 2: release keys that were pressed in the previous timer cycle.
+    if (q.release_pending) {
+        emit_action_up(em, q.held_action);
+        q.release_pending = false;
+        q.held_action = loginext::heuristics::ActionResult::None;
+
+        // If more actions are queued, schedule the next one after pacing interval.
+        if (q.count > 0) {
+            arm_timer(q);
+        }
+        return;
+    }
+
+    // Phase 1: dequeue and press keys.
     if (q.count == 0) {
         disarm_timer(q.timer_fd);
         return;
@@ -77,19 +102,26 @@ void process_timer(PacingQueue& q, EmitterHandle& em) noexcept {
     q.head = static_cast<uint8_t>((q.head + 1) & mask);
     q.count--;
 
-    emit_action(em, action);
+    emit_action_down(em, action);
 
-    if (q.count > 0) {
-        arm_timer(q);
-    }
+    // Schedule key release after key_release_delay_ns (~2ms).
+    q.release_pending = true;
+    q.held_action = action;
+    arm_timer_ns(q.timer_fd, q.profile->key_release_delay_ns);
 }
 
-void check_damping(PacingQueue& q, int64_t now_ns) noexcept {
-    if (q.count == 0) return;
+void check_damping(PacingQueue& q, int64_t now_ns, EmitterHandle& em) noexcept {
+    if (q.count == 0 && !q.release_pending) return;
     if (q.last_input_ns == 0) return;
 
     int64_t silence = now_ns - q.last_input_ns;
     if (silence >= q.profile->damping_timeout_ns) {
+        // Safety: if keys are held down, release them before flushing.
+        if (q.release_pending) {
+            emit_action_up(em, q.held_action);
+            q.release_pending = false;
+            q.held_action = loginext::heuristics::ActionResult::None;
+        }
         q.head = 0;
         q.tail = 0;
         q.count = 0;
@@ -105,3 +137,4 @@ void destroy_pacer(PacingQueue& q) noexcept {
 }
 
 } // namespace loginext::core
+

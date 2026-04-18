@@ -74,13 +74,11 @@ int setup_mouse(int fd) noexcept {
     return 0;
 }
 
-// Press key down, then up, with SYN between — batched into a single write()
-void tap_key_combo(int fd, const int* keys, int count) noexcept {
-    // Max: 3 keys down + SYN + 3 keys up + SYN = 8 events
-    input_event batch[8];
+// Emit KEY_DOWN events for all keys + SYN_REPORT in a single write()
+void press_key_combo(int fd, const int* keys, int count) noexcept {
+    // Max: 3 keys + 1 SYN = 4 events
+    input_event batch[4];
     int n = 0;
-
-    // Press all keys
     for (int i = 0; i < count; ++i) {
         batch[n] = {};
         batch[n].type  = EV_KEY;
@@ -93,7 +91,17 @@ void tap_key_combo(int fd, const int* keys, int count) noexcept {
     batch[n].code = SYN_REPORT;
     ++n;
 
-    // Release all keys (reverse order)
+    ssize_t r = write(fd, batch, static_cast<size_t>(n) * sizeof(input_event));
+    if (r < 0) {
+        std::fprintf(stderr, "[loginext] key press write failed: %s\n", std::strerror(errno));
+    }
+}
+
+// Emit KEY_UP events for all keys (reverse order) + SYN_REPORT in a single write()
+void release_key_combo(int fd, const int* keys, int count) noexcept {
+    // Max: 3 keys + 1 SYN = 4 events
+    input_event batch[4];
+    int n = 0;
     for (int i = count - 1; i >= 0; --i) {
         batch[n] = {};
         batch[n].type  = EV_KEY;
@@ -108,9 +116,13 @@ void tap_key_combo(int fd, const int* keys, int count) noexcept {
 
     ssize_t r = write(fd, batch, static_cast<size_t>(n) * sizeof(input_event));
     if (r < 0) {
-        std::fprintf(stderr, "[loginext] key combo write failed: %s\n", std::strerror(errno));
+        std::fprintf(stderr, "[loginext] key release write failed: %s\n", std::strerror(errno));
     }
 }
+
+// Key arrays for each action (shared between press and release)
+constexpr int keys_tab_next[] = {KEY_LEFTCTRL, KEY_TAB};
+constexpr int keys_tab_prev[] = {KEY_LEFTCTRL, KEY_LEFTSHIFT, KEY_TAB};
 
 } // namespace
 
@@ -150,23 +162,26 @@ int init_emitter(EmitterHandle& em) noexcept {
     return 0;
 }
 
-void emit_tab_next(EmitterHandle& em) noexcept {
-    const int keys[] = {KEY_LEFTCTRL, KEY_TAB};
-    tap_key_combo(em.kbd_fd, keys, 2);
-}
-
-void emit_tab_prev(EmitterHandle& em) noexcept {
-    const int keys[] = {KEY_LEFTCTRL, KEY_LEFTSHIFT, KEY_TAB};
-    tap_key_combo(em.kbd_fd, keys, 3);
-}
-
-void emit_action(EmitterHandle& em, loginext::heuristics::ActionResult action) noexcept {
+void emit_action_down(EmitterHandle& em, loginext::heuristics::ActionResult action) noexcept {
     switch (action) {
         case loginext::heuristics::ActionResult::TabNext:
-            emit_tab_next(em);
+            press_key_combo(em.kbd_fd, keys_tab_next, 2);
             break;
         case loginext::heuristics::ActionResult::TabPrev:
-            emit_tab_prev(em);
+            press_key_combo(em.kbd_fd, keys_tab_prev, 3);
+            break;
+        case loginext::heuristics::ActionResult::None:
+            break;
+    }
+}
+
+void emit_action_up(EmitterHandle& em, loginext::heuristics::ActionResult action) noexcept {
+    switch (action) {
+        case loginext::heuristics::ActionResult::TabNext:
+            release_key_combo(em.kbd_fd, keys_tab_next, 2);
+            break;
+        case loginext::heuristics::ActionResult::TabPrev:
+            release_key_combo(em.kbd_fd, keys_tab_prev, 3);
             break;
         case loginext::heuristics::ActionResult::None:
             break;
@@ -195,3 +210,4 @@ void destroy_emitter(EmitterHandle& em) noexcept {
 }
 
 } // namespace loginext::core
+
