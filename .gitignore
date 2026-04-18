@@ -87,3 +87,7 @@ perf.data
 perf.data.old
 *.log
 *.trace
+# Md Files
+agents.md 
+progress.md
+
