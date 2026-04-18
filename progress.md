@@ -1,125 +1,125 @@
 # LogiNext — Progress
 
-Arch/CachyOS üzerinde çalışan, userspace'te Logitech cihazlarını Options+ benzeri bir kontrol yüzeyiyle yöneten C++ daemon'u. İlk hedef: MX Master 3S thumb wheel ile pürüzsüz sekme geçişi, sonraki hedef: her tuş ve tekerleği uygulama bazında konfigüre edilebilir yapan bir UI.
+A C++ daemon running on Arch/CachyOS that manages Logitech devices in userspace with an Options+-like control surface. First goal: smooth tab switching via the MX Master 3S thumb wheel. Next goal: a UI that makes every button and wheel configurable on a per-application basis.
 
 ---
 
 ## Phase 1 — Thumb Wheel → Tab Navigation Engine
 
-Tamamlandı. Gerçek cihaz üzerinde kalibre edildi.
+Completed. Calibrated on real hardware.
 
 ### Device I/O
-- [x] `/dev/input/*` taraması, VID/PID ile MX Master 3S otomatik tespit
-- [x] `libevdev` üzerinden cihaza **exclusive grab**
-- [x] `uinput` ile iki sanal cihaz: sekme için sanal klavye, passthrough için sanal fare
-- [x] Tek thread, `epoll` (edge-triggered) + `timerfd` event loop'u
-- [x] Sinyaller: `SIGINT` / `SIGTERM` ile düzgün kapanış, `SIGHUP` ile config reload
+- [x] `/dev/input/*` scanning, automatic MX Master 3S detection by VID/PID
+- [x] **Exclusive grab** on device via `libevdev`
+- [x] Two virtual devices via `uinput`: virtual keyboard for tabs, virtual mouse for passthrough
+- [x] Single thread, `epoll` (edge-triggered) + `timerfd` event loop
+- [x] Signals: graceful shutdown via `SIGINT` / `SIGTERM`, config reload via `SIGHUP`
 
 ### Heuristic Engine
-- [x] `REL_HWHEEL` için **leaky-bucket accumulator** (`ScrollState`)
-- [x] **Velocity-aware dynamic threshold**: Δt'ye göre fast/slow threshold arasında lerp
-- [x] **Idle reset**: `idle_reset_ns`'den uzun sessizlik → accumulator sıfır, yeni gesture
-- [x] **Leading-edge confirmation window**: gesture'ın ilk event'i hemen emit edilmez; `confirmation_window_ns` içinde aynı yönde ikinci event gelirse teyit edilir → wheel üstünde duran parmağın tetiklediği tek-event hayaletler filtrelenir
-- [x] **Emit cooldown**: aynı gesture içinde minimum emit aralığı
-- [x] **Axis invert** (config'den; MX Master 3S için varsayılan `true`)
+- [x] **Leaky-bucket accumulator** for `REL_HWHEEL` (`ScrollState`)
+- [x] **Velocity-aware dynamic threshold**: lerp between fast/slow threshold based on Δt
+- [x] **Idle reset**: silence longer than `idle_reset_ns` → accumulator zeroed, new gesture
+- [x] **Leading-edge confirmation window**: the first event of a gesture is not emitted immediately; if a second event in the same direction arrives within `confirmation_window_ns`, it is confirmed → filters out single-event ghosts caused by a resting finger on the wheel
+- [x] **Emit cooldown**: minimum emit interval within the same gesture
+- [x] **Axis invert** (from config; default `true` for MX Master 3S)
 
 ### Output & Pacing
-- [x] `uinput` üzerinden `Ctrl+Tab` ve `Ctrl+Shift+Tab`
-- [x] Ring buffer'lı pacing queue + `timerfd` (`pacing_interval_ns`)
-- [x] Damping: giriş kesilince kuyrukta biriken event'leri frenle (`damping_timeout_ns`)
-- [x] Tab-switching dışında kalan tüm event'ler sanal fareden passthrough
+- [x] `Ctrl+Tab` and `Ctrl+Shift+Tab` via `uinput`
+- [x] Ring buffer pacing queue + `timerfd` (`pacing_interval_ns`)
+- [x] Damping: when input stops, brake events accumulated in the queue (`damping_timeout_ns`)
+- [x] All events other than tab-switching are passed through via virtual mouse
 
 ### Config Layer
-- [x] 3 preset: `low` / `medium` / `high` (`Profile` struct, `constexpr`)
-- [x] Flat JSON parser (bağımlılıksız, ~100 satır) → `~/.config/loginext/config.json`
+- [x] 3 presets: `low` / `medium` / `high` (`Profile` struct, `constexpr`)
+- [x] Flat JSON parser (dependency-free, ~100 lines) → `~/.config/loginext/config.json`
 - [x] CLI override: `--mode=low|medium|high`, `--config=<path>`, `--help`
-- [x] `SIGHUP` → hot reload, gesture state sıfırlanır
+- [x] `SIGHUP` → hot reload, gesture state is reset
 
 ### Build & Tooling
-- [x] CMake 3.25+ / Ninja, tek binary target
-- [x] `-O2 -Wall -Wextra -Wpedantic -Werror` temiz derleme
-- [x] `compile_commands.json` export (IDE entegrasyonu)
+- [x] CMake 3.25+ / Ninja, single binary target
+- [x] `-O2 -Wall -Wextra -Wpedantic -Werror` clean compilation
+- [x] `compile_commands.json` export (IDE integration)
 
 ---
 
-## Phase 2 — Konfigürasyon UI'si (sıradaki)
+## Phase 2 — Configuration UI (next)
 
-Hedef: Logitech Options+'a benzer bir kontrol paneli. Kullanıcı:
+Goal: a control panel similar to Logitech Options+. The user:
 
-1. Bağlı Logitech cihazları görür (şimdilik yalnızca MX Master 3S).
-2. Cihaz üzerinde fiziksel bir kontrol seçer (Phase 2 için **thumb wheel**; ileride diğer butonlar/wheel'lar).
-3. O kontrol için bir **action preset** atar. İlk preset: **"Navigate between tabs"** — Phase 1'de üretilen motor bu preset'in arkasındaki engine olur.
-4. Preset seçilince alt kısımda ona özel parametreler açılır (tab navigation için: sensitivity `low`/`medium`/`high` ya da sürekli slider, invert axis).
-5. Bu kuralı **global** veya **uygulama bazında** (ör. sadece Firefox) uygular.
+1. Sees connected Logitech devices (only MX Master 3S for now).
+2. Selects a physical control on the device (for Phase 2: **thumb wheel**; other buttons/wheels later).
+3. Assigns an **action preset** to that control. First preset: **"Navigate between tabs"** — the engine built in Phase 1 powers this preset.
+4. Once a preset is selected, its specific parameters appear below (for tab navigation: sensitivity `low`/`medium`/`high` or continuous slider, invert axis).
+5. Applies this rule **globally** or **per-application** (e.g. Firefox only).
 
-### Tema
-- **Neumorphism — dark variant**. Soft kabartma/yuvarlatma dilini karanlık palete uyarla: `#1e1f24`/`#262830` yüzey, `rgba(0,0,0,0.55)` iç/dış gölge + `rgba(255,255,255,0.04)` highlight, `#6c7cff` accent. Köşeler 16–24px, aktif eleman "basılmış" (inset shadow), pasif eleman "kaldırılmış" (outer shadow).
+### Theme
+- **Neumorphism — dark variant**. Adapt the soft emboss/rounding language to a dark palette: `#1e1f24`/`#262830` surface, `rgba(0,0,0,0.55)` inner/outer shadow + `rgba(255,255,255,0.04)` highlight, `#6c7cff` accent. Corners 16–24px, active element "pressed" (inset shadow), passive element "raised" (outer shadow).
 
-### Mimari karar — daemon ↔ UI IPC
-- UI bağımsız bir process, daemon hot path'e zarar vermez.
-- Transport: **Unix domain socket** (`$XDG_RUNTIME_DIR/loginext.sock`). D-Bus gibi framework yok (agents.md kuralı).
-- Protokol: line-delimited JSON. Komut seti: `list_devices`, `list_controls`, `list_presets`, `get_bindings`, `set_binding`, `get_profile`, `set_profile`, `reload`.
-- Daemon mevcut `Settings` yapısına "bindings" eklenir, config JSON şeması genişletilir. UI config dosyasına yazdıktan sonra daemon'a `reload` der (SIGHUP altyapısı hazır).
+### Architectural decision — daemon ↔ UI IPC
+- UI is a separate process; does not harm daemon hot path.
+- Transport: **Unix domain socket** (`$XDG_RUNTIME_DIR/loginext.sock`). No framework like D-Bus (agents.md rule).
+- Protocol: line-delimited JSON. Command set: `list_devices`, `list_controls`, `list_presets`, `get_bindings`, `set_binding`, `get_profile`, `set_profile`, `reload`.
+- "Bindings" are added to the daemon's existing `Settings` struct; config JSON schema is extended. After the UI writes to the config file, it tells the daemon to `reload` (SIGHUP infrastructure is ready).
 
-### Tech stack adayları
-- **Tauri (Rust shell + web frontend)**: küçük binary, tek runtime, neumorphism CSS ile doğal. Tercih edilen.
-- Alternatif: **Qt 6 / QML** (native ama ağır), **GTK4 + libadwaita** (GNOME-centric).
-- Seçim Phase 2.1'de netleşir; `ui/` alt dizini ana repo içinde kalır (monorepo).
+### Tech stack candidates
+- **Tauri (Rust shell + web frontend)**: small binary, single runtime, natural neumorphism via CSS. Preferred.
+- Alternative: **Qt 6 / QML** (native but heavy), **GTK4 + libadwaita** (GNOME-centric).
+- Decision finalized in Phase 2.1; `ui/` subdirectory stays inside the main repo (monorepo).
 
-### Phase 2.1 — Daemon IPC katmanı
-- [ ] `src/ipc/` modülü: UDS listener, epoll'e register, non-blocking accept
-- [ ] JSON komut dispatch'i (loader'daki mini parser genişletilir)
-- [ ] `bindings` kavramı: `(device_id, control_id) → (preset_id, preset_params, scope)` eşlemesi
-- [ ] Config şeması v2: geri uyumlu, eski flat key'ler fallback olarak okunur
-- [ ] Integration test: CLI client (`loginext-ctl`) ile socket'e komut yolla, cevap parse et
+### Phase 2.1 — Daemon IPC layer
+- [ ] `src/ipc/` module: UDS listener, register with epoll, non-blocking accept
+- [ ] JSON command dispatch (mini parser from loader is extended)
+- [ ] `bindings` concept: `(device_id, control_id) → (preset_id, preset_params, scope)` mapping
+- [ ] Config schema v2: backward-compatible, old flat keys are read as fallback
+- [ ] Integration test: send commands to socket via CLI client (`loginext-ctl`), parse response
 
-### Phase 2.2 — UI iskeleti
-- [ ] Tech stack kararı ve `ui/` bootstrap (Tauri varsayımı)
+### Phase 2.2 — UI skeleton
+- [ ] Tech stack decision and `ui/` bootstrap (Tauri assumed)
 - [ ] Neumorphism dark design tokens (CSS variables): surface, shadow, accent, radius, typography
-- [ ] Ortak bileşenler: `Card`, `RaisedButton`, `PressedButton`, `Toggle`, `Slider`, `ListItem`
-- [ ] UDS client: daemon'a bağlan, heartbeat, reconnection
+- [ ] Common components: `Card`, `RaisedButton`, `PressedButton`, `Toggle`, `Slider`, `ListItem`
+- [ ] UDS client: connect to daemon, heartbeat, reconnection
 
 ### Phase 2.3 — Device & Control browser
-- [ ] Sol kolon: bağlı cihazların listesi (MX Master 3S)
-- [ ] Orta kolon: seçili cihazın kontrolleri (thumb wheel başta tek; ileride butonlar, wheel'lar)
-- [ ] Sağ kolon: seçili kontrol için atanmış preset + parametreleri
-- [ ] Device/control görselleri için basit SVG placeholder
+- [ ] Left column: list of connected devices (MX Master 3S)
+- [ ] Middle column: controls of the selected device (thumb wheel is the only one initially; buttons and wheels later)
+- [ ] Right column: assigned preset + parameters for the selected control
+- [ ] Simple SVG placeholders for device/control visuals
 
-### Phase 2.4 — "Navigate between tabs" preset paneli
-- [ ] Preset seçici dropdown (ilk giriş: Navigate between tabs; diğerleri ileride)
-- [ ] Sensitivity seçimi: 3 segmentli toggle (Low / Medium / High) + opsiyonel sürekli slider
-- [ ] Invert axis toggle'ı
-- [ ] "Live preview": UI açıkken üretilen event'leri göster (debug overlay)
+### Phase 2.4 — "Navigate between tabs" preset panel
+- [ ] Preset selector dropdown (first entry: Navigate between tabs; others later)
+- [ ] Sensitivity selection: 3-segment toggle (Low / Medium / High) + optional continuous slider
+- [ ] Invert axis toggle
+- [ ] "Live preview": show generated events while UI is open (debug overlay)
 
 ### Phase 2.5 — Scope: global vs per-app
-- [ ] Kural kapsamı seçici: "All applications" | "Only in…"
-- [ ] Aktif pencere tespiti: Wayland için `wlr-foreign-toplevel` veya `ext-foreign-toplevel-list`, X11 için `_NET_ACTIVE_WINDOW`. Compositor desteği değişken — fallback: kullanıcı uygulamayı manuel seçer (executable adı / WM_CLASS).
-- [ ] Daemon tarafı: aktif pencereye göre binding lookup (hot path'e eklenirken cache + invalidation şart)
-- [ ] Kural çakışması: en spesifik eşleşme kazanır (per-app > global).
+- [ ] Rule scope selector: "All applications" | "Only in…"
+- [ ] Active window detection: `wlr-foreign-toplevel` or `ext-foreign-toplevel-list` for Wayland, `_NET_ACTIVE_WINDOW` for X11. Compositor support varies — fallback: user selects application manually (executable name / WM_CLASS).
+- [ ] Daemon side: binding lookup by active window (cache + invalidation required when adding to hot path)
+- [ ] Rule conflict: most specific match wins (per-app > global).
 
 ### Phase 2.6 — Polishing
-- [ ] Import/export: ayar dosyasını başka makineye taşıma
-- [ ] Autostart: `~/.config/systemd/user/loginext.service` şablonu (user unit; uinput izinleri için udev kuralı da gerekebilir)
-- [ ] Tray / indicator (opsiyonel)
+- [ ] Import/export: transfer settings file to another machine
+- [ ] Autostart: `~/.config/systemd/user/loginext.service` template (user unit; udev rule may also be needed for uinput permissions)
+- [ ] Tray / indicator (optional)
 
 ---
 
-## Phase 3 — Diğer kontroller (gelecek)
+## Phase 3 — Other controls (future)
 
-Phase 2 biter bitmez aşağıdaki kontroller `bindings` sistemine dahil edilecek. Her biri ayrı bir preset ailesi gerektirir:
+As soon as Phase 2 is complete, the following controls will be integrated into the `bindings` system. Each requires a separate preset family:
 
-- Back / Forward butonları
-- Gesture button (thumb altı)
-- Dikey scroll wheel (SmartShift toggle entegrasyonu araştırılacak)
-- Mode-shift button (cihaz tarafında değişim mümkünse)
+- Back / Forward buttons
+- Gesture button (under thumb)
+- Vertical scroll wheel (SmartShift toggle integration to be investigated)
+- Mode-shift button (if device-side change is possible)
 
-Preset adayları: "Window switcher", "Workspace switch", "Volume", "Zoom", "Custom keystroke", "Run command".
+Preset candidates: "Window switcher", "Workspace switch", "Volume", "Zoom", "Custom keystroke", "Run command".
 
 ---
 
-## Tasarım notları — kalıcı kurallar
+## Design notes — permanent rules
 
-- Hot path'te heap allocation yok; hâlâ geçerli.
-- UI sadece config dosyasına yazar + daemon'a `reload` der. Hot path'e UI'dan doğrudan erişim yok.
-- Per-app lookup daemon hot path'inde olacak, bu yüzden O(1) hash map + pencere değişimine subscribe şart.
-- Her yeni preset için: `heuristics/` altında bir state + `core/emitter` üzerinden bir çıktı. Diğer her şey `bindings` ve `ipc`'ten gelir.
+- No heap allocation on the hot path; still in effect.
+- UI only writes to the config file + tells the daemon to `reload`. No direct access to the hot path from the UI.
+- Per-app lookup will be on the daemon hot path, so O(1) hash map + subscribe to window changes is required.
+- For each new preset: a state under `heuristics/` + an output via `core/emitter`. Everything else comes from `bindings` and `ipc`.

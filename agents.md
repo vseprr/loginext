@@ -1,28 +1,28 @@
 # LogiNext — Agent Instructions
 
-Bu dosya, repo üzerinde çalışacak AI ajanlarının uyması gereken kuralları belirtir. Proje kapsamı ve yol haritası için [progress.md](./progress.md), kullanıcıya dönük açıklama için [README.md](./README.md) referans alınmalıdır.
+This file specifies the rules that AI agents working on this repo must follow. Refer to [progress.md](./progress.md) for project scope and roadmap, and [README.md](./README.md) for user-facing description.
 
 ## Target
 
-- **OS:** Arch / CachyOS (düşük gecikmeli çekirdek — `linux-cachyos` ya da `linux-zen`). Diğer dağıtımlarda çalışması muhtemel ama birincil hedef bu.
+- **OS:** Arch / CachyOS (low-latency kernel — `linux-cachyos` or `linux-zen`). Likely to work on other distros, but this is the primary target.
 - **Arch:** x86_64.
-- **Display server:** Hem X11 hem Wayland (Phase 2.5 için her ikisinde de aktif pencere tespiti hedeflenir).
+- **Display server:** Both X11 and Wayland (active window detection on both is targeted for Phase 2.5).
 
 ## Stack
 
-- **Dil:** C++20 (GCC 14+ / Clang 18+). `constexpr`, `std::chrono`, designated initializer'lar, `std::span` tercih edilir.
-- **Input:** `libevdev` — fiziksel cihaz düğümünde (`/dev/input/eventX`) exclusive grab.
-- **Output:** `uinput` — sanal klavye (Ctrl+Tab vb.) + sanal fare (passthrough).
-- **Build:** CMake 3.25+, Ninja. Tek binary target (`loginext`).
-- **UI (Phase 2):** muhtemelen Tauri (Rust + web). Karar Phase 2.1'de verilir; ana daemon'a yeni dil bağımlılığı eklemez — UI ayrı process.
+- **Language:** C++20 (GCC 14+ / Clang 18+). Prefer `constexpr`, `std::chrono`, designated initializers, `std::span`.
+- **Input:** `libevdev` — exclusive grab on physical device node (`/dev/input/eventX`).
+- **Output:** `uinput` — virtual keyboard (Ctrl+Tab etc.) + virtual mouse (passthrough).
+- **Build:** CMake 3.25+, Ninja. Single binary target (`loginext`).
+- **UI (Phase 2):** Likely Tauri (Rust + web). Decision will be made in Phase 2.1; does not add a new language dependency to the main daemon — UI is a separate process.
 
 ## Core Rules
 
-1. **Latency is law.** Event loop'unda heap allocation yasak. Her şey init sırasında ayrılır. Sıcak yoldaki tüm state stack üzerinde taşınır (`AppContext`, `ScrollState`, `PacingQueue`).
-2. **No OOP bloat.** Flat struct + free function. Polimorfizm yalnızca `std::variant` veya compile-time dispatch ile.
-3. **No frameworks.** Boost, Qt, D-Bus, nlohmann/json yok. Doğrudan syscall (`epoll`, `timerfd`, `uinput`). JSON için ~100 satırlık ad-hoc parser (bkz. [src/config/loader.cpp](./src/config/loader.cpp)). Şema büyürse tek-başlık bir parser değerlendirilir, o zamana kadar hayır.
-4. **Signal density.** Her satır varlığını ispatlamalı. Yorumlar *why* söyler, *what* söylemez.
-5. **Config live-reload.** Runtime davranışını belirleyen her yeni parametre `config::Profile` veya `config::Settings`'e eklenir ve `SIGHUP` ile yeniden yüklenebilir olmalıdır.
+1. **Latency is law.** No heap allocation in the event loop. Everything is allocated at init time. All state on the hot path is carried on the stack (`AppContext`, `ScrollState`, `PacingQueue`).
+2. **No OOP bloat.** Flat struct + free function. Polymorphism only via `std::variant` or compile-time dispatch.
+3. **No frameworks.** No Boost, Qt, D-Bus, nlohmann/json. Direct syscalls (`epoll`, `timerfd`, `uinput`). ~100-line ad-hoc parser for JSON (see [src/config/loader.cpp](./src/config/loader.cpp)). A single-header parser will be considered if the schema grows; until then, no.
+4. **Signal density.** Every line must justify its existence. Comments say *why*, not *what*.
+5. **Config live-reload.** Every new parameter that determines runtime behavior must be added to `config::Profile` or `config::Settings` and must be reloadable via `SIGHUP`.
 
 ## Project Layout
 
@@ -43,22 +43,22 @@ src/
 │   └── loader.{hpp,cpp}
 └── main.cpp        # Entry, init, teardown, signal & callback wiring
 
-config/example.json # Örnek kullanıcı config'i
+config/example.json # Example user config
 ```
 
-Phase 2 yeni dizinler ekler: `src/ipc/` (UDS sunucusu), `ui/` (frontend).
+Phase 2 adds new directories: `src/ipc/` (UDS server), `ui/` (frontend).
 
 ## Device
 
-- **Logitech MX Master 3S** — Bolt receiver (`046d:b034`) veya USB kablolu (`046d:c548`).
-- Thumb wheel → `REL_HWHEEL` (yatay relative axis).
-- Diğer kontroller (Phase 3) için event mapping ayrıca keşfedilecek.
+- **Logitech MX Master 3S** — Bolt receiver (`046d:b034`) or USB wired (`046d:c548`).
+- Thumb wheel → `REL_HWHEEL` (horizontal relative axis).
+- Event mapping for other controls (Phase 3) will be explored separately.
 
 ## Conventions
 
-- Header + kaynak dosya ikilisi (no header-only unless trivial).
+- Header + source file pairs (no header-only unless trivial).
 - Namespace: `loginext::{core, heuristics, config, ipc}`.
-- `[[nodiscard]]` — çağıranın ignore etmemesi gereken tüm dönüşlere.
-- `noexcept` — hot path fonksiyonlarında default.
-- CLI/config flag isimleri `snake_case`, JSON key'leri `snake_case`.
-- Commit stili: kısa imperative başlık + gerekiyorsa gövdede "why".
+- `[[nodiscard]]` — on all return values the caller should not ignore.
+- `noexcept` — default on hot path functions.
+- CLI/config flag names `snake_case`, JSON keys `snake_case`.
+- Commit style: short imperative title + "why" in body if needed.
