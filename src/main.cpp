@@ -15,11 +15,11 @@
 
 namespace {
 
-volatile bool          g_stop   = false;
+volatile sig_atomic_t  g_stop   = 0;
 volatile sig_atomic_t  g_reload = 0;
 
 void signal_stop(int /*sig*/) noexcept {
-    g_stop = true;
+    g_stop = 1;
 }
 
 void signal_reload(int /*sig*/) noexcept {
@@ -60,8 +60,13 @@ void on_event(const input_event& ev, void* ctx) {
     }
 
     // Everything else → passthrough to virtual mouse
-    if (ev.type == EV_SYN || ev.type == EV_REL || ev.type == EV_KEY ||
-        ev.type == EV_MSC) {
+    if (ev.type == EV_SYN) {
+        // Don't re-emit SYN_DROPPED — it signals physical-device buffer overrun,
+        // not relevant on the virtual device.
+        if (ev.code != SYN_DROPPED) {
+            loginext::core::emit_passthrough(app->emitter, ev);
+        }
+    } else if (ev.type == EV_REL || ev.type == EV_KEY || ev.type == EV_MSC) {
         loginext::core::emit_passthrough(app->emitter, ev);
     }
 }
@@ -81,12 +86,7 @@ void on_reload(void* ctx) {
         std::fprintf(stderr, "[loginext] SIGHUP: no config changes applied\n");
     }
     // Reset gesture state so the next event starts a clean leading-edge emit
-    app->scroll.accumulator   = 0;
-    app->scroll.direction     = 0;
-    app->scroll.pending_dir   = 0;
-    app->scroll.last_event_ns = 0;
-    app->scroll.last_emit_ns  = 0;
-    app->scroll.pending_ts    = 0;
+    app->scroll = {};
 }
 
 } // namespace

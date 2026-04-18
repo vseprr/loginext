@@ -45,7 +45,7 @@ int register_timer(EventLoop& loop, int timer_fd) noexcept {
 }
 
 void run_loop(EventLoop& loop, int device_fd, void* evdev_raw,
-              volatile bool* stop,
+              volatile sig_atomic_t* stop,
               volatile sig_atomic_t* reload,
               EventCallback  event_cb,  void* event_ctx,
               TimerCallback  timer_cb,  void* timer_ctx,

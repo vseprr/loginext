@@ -13,19 +13,6 @@ namespace loginext::core {
 
 namespace {
 
-void write_event(int fd, uint16_t type, uint16_t code, int32_t value) noexcept {
-    input_event ev{};
-    ev.type = type;
-    ev.code = code;
-    ev.value = value;
-    // Timestamp left zeroed — kernel fills it for uinput
-    [[maybe_unused]] auto r = write(fd, &ev, sizeof(ev));
-}
-
-void syn(int fd) noexcept {
-    write_event(fd, EV_SYN, SYN_REPORT, 0);
-}
-
 int open_uinput() noexcept {
     int fd = open("/dev/uinput", O_WRONLY | O_NONBLOCK);
     if (fd < 0) {
@@ -70,6 +57,10 @@ int setup_mouse(int fd) noexcept {
         if (ioctl(fd, UI_SET_RELBIT, rel) < 0) return -1;
     }
 
+    // Enable EV_MSC for scan codes (passthrough from physical device)
+    if (ioctl(fd, UI_SET_EVBIT, EV_MSC) < 0) return -1;
+    if (ioctl(fd, UI_SET_MSCBIT, MSC_SCAN) < 0) return -1;
+
     uinput_setup setup{};
     std::strncpy(setup.name, "loginext-mouse", sizeof(setup.name) - 1);
     setup.id.bustype = BUS_VIRTUAL;
@@ -83,19 +74,42 @@ int setup_mouse(int fd) noexcept {
     return 0;
 }
 
-// Press key down, then up, with SYN between
+// Press key down, then up, with SYN between — batched into a single write()
 void tap_key_combo(int fd, const int* keys, int count) noexcept {
+    // Max: 3 keys down + SYN + 3 keys up + SYN = 8 events
+    input_event batch[8];
+    int n = 0;
+
     // Press all keys
     for (int i = 0; i < count; ++i) {
-        write_event(fd, EV_KEY, static_cast<uint16_t>(keys[i]), 1);
+        batch[n] = {};
+        batch[n].type  = EV_KEY;
+        batch[n].code  = static_cast<uint16_t>(keys[i]);
+        batch[n].value = 1;
+        ++n;
     }
-    syn(fd);
+    batch[n] = {};
+    batch[n].type = EV_SYN;
+    batch[n].code = SYN_REPORT;
+    ++n;
 
     // Release all keys (reverse order)
     for (int i = count - 1; i >= 0; --i) {
-        write_event(fd, EV_KEY, static_cast<uint16_t>(keys[i]), 0);
+        batch[n] = {};
+        batch[n].type  = EV_KEY;
+        batch[n].code  = static_cast<uint16_t>(keys[i]);
+        batch[n].value = 0;
+        ++n;
     }
-    syn(fd);
+    batch[n] = {};
+    batch[n].type = EV_SYN;
+    batch[n].code = SYN_REPORT;
+    ++n;
+
+    ssize_t r = write(fd, batch, static_cast<size_t>(n) * sizeof(input_event));
+    if (r < 0) {
+        std::fprintf(stderr, "[loginext] key combo write failed: %s\n", std::strerror(errno));
+    }
 }
 
 } // namespace
@@ -160,7 +174,10 @@ void emit_action(EmitterHandle& em, loginext::heuristics::ActionResult action) n
 }
 
 void emit_passthrough(EmitterHandle& em, const struct input_event& ev) noexcept {
-    [[maybe_unused]] auto r = write(em.mouse_fd, &ev, sizeof(ev));
+    ssize_t r = write(em.mouse_fd, &ev, sizeof(ev));
+    if (r < 0 && errno != EAGAIN) {
+        std::fprintf(stderr, "[loginext] passthrough write failed: %s\n", std::strerror(errno));
+    }
 }
 
 void destroy_emitter(EmitterHandle& em) noexcept {

@@ -30,7 +30,7 @@ struct EventLoop {
 // Runs until *stop becomes true (set by SIGINT/SIGTERM handler).
 // *reload is consumed (reset to 0) after each reload_cb invocation.
 void run_loop(EventLoop& loop, int device_fd, void* evdev,
-              volatile bool* stop,
+              volatile sig_atomic_t* stop,
               volatile sig_atomic_t* reload,
               EventCallback  event_cb,  void* event_ctx,
               TimerCallback  timer_cb,  void* timer_ctx,

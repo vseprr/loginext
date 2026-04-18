@@ -35,3 +35,15 @@ target_compile_options(loginext PRIVATE
     -Wpedantic
     -Werror
 )
+
+# --- Optional performance flags (suitable for single-machine daemon) ---
+
+option(LOGINEXT_LTO "Enable link-time optimization" ON)
+if(LOGINEXT_LTO)
+    set_property(TARGET loginext PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
+endif()
+
+option(LOGINEXT_NATIVE "Use -march=native (non-portable binary)" ON)
+if(LOGINEXT_NATIVE)
+    target_compile_options(loginext PRIVATE -march=native)
+endif()

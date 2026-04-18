@@ -4,9 +4,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <fstream>
-#include <sstream>
+#include <fcntl.h>
 #include <string_view>
+#include <unistd.h>
 
 namespace loginext::config {
 
@@ -37,8 +37,8 @@ public:
 
         while (true) {
             skip_ws();
-            std::string key;
-            if (!parse_string(key)) return false;
+            std::string_view key;
+            if (!parse_string_view(key)) return false;
             skip_ws();
             if (!consume(':')) return fail("expected ':'");
             skip_ws();
@@ -51,10 +51,10 @@ public:
     }
 
 private:
-    bool apply_value(const std::string& key, Settings& out) {
+    bool apply_value(std::string_view key, Settings& out) {
         if (key == "sensitivity") {
-            std::string v;
-            if (!parse_string(v)) return false;
+            std::string_view v;
+            if (!parse_string_view(v)) return false;
             if      (v == "low")    out.mode = SensitivityMode::Low;
             else if (v == "medium") out.mode = SensitivityMode::Medium;
             else if (v == "high")   out.mode = SensitivityMode::High;
@@ -71,13 +71,14 @@ private:
         return skip_value();
     }
 
-    bool parse_string(std::string& out) {
+    bool parse_string_view(std::string_view& out) {
         if (!consume('"')) return fail("expected string");
-        out.clear();
+        size_t start = pos_;
         while (pos_ < src_.size() && src_[pos_] != '"') {
             if (src_[pos_] == '\\') return fail("escape sequences not supported");
-            out.push_back(src_[pos_++]);
+            ++pos_;
         }
+        out = src_.substr(start, pos_ - start);
         if (!consume('"')) return fail("unterminated string");
         return true;
     }
@@ -89,7 +90,7 @@ private:
     }
 
     bool skip_value() {
-        if (peek() == '"')  { std::string tmp; return parse_string(tmp); }
+        if (peek() == '"')  { std::string_view tmp; return parse_string_view(tmp); }
         bool dummy;
         if (peek() == 't' || peek() == 'f') return parse_bool(dummy);
         return fail("unsupported value type");
@@ -130,18 +131,23 @@ private:
 bool load_settings(const std::string& path, Settings& s) noexcept {
     if (path.empty()) return false;
 
-    std::ifstream f(path);
-    if (!f.is_open()) {
+    // Stack-based I/O — no heap allocation on the reload path.
+    // Config file is a small flat JSON; 4 KiB is more than sufficient.
+    int fd = open(path.c_str(), O_RDONLY);
+    if (fd < 0) {
         // Missing file is not an error — silent return, caller keeps defaults.
         return false;
     }
 
-    std::stringstream buf;
-    buf << f.rdbuf();
-    std::string content = buf.str();
+    char buf[4096];
+    ssize_t n = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+
+    if (n <= 0) return false;
+    buf[n] = '\0';
 
     Settings tmp = s;  // parse into a scratch copy; only commit on full success
-    Parser   p(content);
+    Parser   p(std::string_view(buf, static_cast<size_t>(n)));
     if (!p.parse(tmp)) {
         std::fprintf(stderr, "[loginext] config %s: parse failed, keeping previous settings\n",
                      path.c_str());
@@ -154,3 +160,4 @@ bool load_settings(const std::string& path, Settings& s) noexcept {
 }
 
 } // namespace loginext::config
+

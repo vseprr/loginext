@@ -1,8 +1,7 @@
 #include "heuristics/scroll_state.hpp"
 
 #include <algorithm>
-#include <climits>
-#include <cmath>
+#include <cstdlib>
 
 namespace loginext::heuristics {
 
