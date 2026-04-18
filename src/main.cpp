@@ -45,12 +45,24 @@ void on_event(const input_event& ev, void* ctx) {
     int64_t ts = timeval_to_ns(ev.time);
 
     if (ev.type == EV_REL && ev.code == REL_HWHEEL) {
+        // [ev-trace] TEMPORARY: diagnose ghost events; remove once tuned
+        static int64_t prev_ev_ts = 0;
+        long long dt_ms        = prev_ev_ts > 0 ? (ts - prev_ev_ts) / 1'000'000 : -1;
+        long long since_emit_ms = app->scroll.last_emit_ns > 0
+                                ? (ts - app->scroll.last_emit_ns) / 1'000'000
+                                : -1;
+        std::fprintf(stderr, "[ev-trace] val=%+d dt=%lldms since_emit=%lldms\n",
+                     ev.value, dt_ms, since_emit_ms);
+        prev_ev_ts = ts;
+
         loginext::heuristics::tick_leak(app->scroll, ts, app->settings.profile);
 
         int32_t value = app->settings.invert_hwheel ? -ev.value : ev.value;
         auto result = loginext::heuristics::process_hwheel(app->scroll, value, ts,
                                                            app->settings.profile);
         if (result != loginext::heuristics::ActionResult::None) {
+            std::fprintf(stderr, "[ev-trace]   -> EMIT %s\n",
+                         result == loginext::heuristics::ActionResult::TabNext ? "TabNext" : "TabPrev");
             loginext::core::enqueue_action(app->pacer, result, ts);
         }
 
@@ -82,8 +94,10 @@ void on_reload(void* ctx) {
     // Reset gesture state so the next event starts a clean leading-edge emit
     app->scroll.accumulator   = 0;
     app->scroll.direction     = 0;
+    app->scroll.pending_dir   = 0;
     app->scroll.last_event_ns = 0;
     app->scroll.last_emit_ns  = 0;
+    app->scroll.pending_ts    = 0;
 }
 
 } // namespace

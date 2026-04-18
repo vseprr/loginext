@@ -1,5 +1,89 @@
+# Build & cache
 build/
+build-*/
 .cache/
+.ccache/
 *.o
+*.obj
+*.a
 *.so
+*.dylib
+*.out
+CMakeCache.txt
+CMakeFiles/
+CMakeScripts/
+cmake_install.cmake
+CTestTestfile.cmake
 compile_commands.json
+install_manifest.txt
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*.swn
+*~
+.DS_Store
+Thumbs.db
+*.code-workspace
+
+# Clangd / LSP
+.cache/
+.clangd/
+.clang-format.bak
+
+# Agent / tool state
+.claude/
+.gemini/
+.aider*
+.cursor/
+.windsurf/
+
+# Phase 2 UI (Tauri / Node)
+ui/node_modules/
+ui/dist/
+ui/.svelte-kit/
+ui/.next/
+ui/target/
+ui/src-tauri/target/
+ui/src-tauri/Cargo.lock
+ui/.env
+ui/.env.*
+
+# Local / user-specific
+*.local
+*.bak
+*.orig
+*.rej
+
+# Secrets & user data — asla commit'lenmemeli
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+id_rsa
+id_rsa.*
+id_ed25519
+id_ed25519.*
+.env
+.env.*
+secrets/
+*.secret
+*.token
+*_token
+*_secret
+
+# Kullanıcı runtime config'i (örnek değil, gerçek ayar)
+config/config.json
+config/local.json
+
+# Debug & profiling artefaktları
+core
+core.*
+vgcore.*
+perf.data
+perf.data.old
+*.log
+*.trace

@@ -52,13 +52,33 @@ ActionResult process_hwheel(ScrollState& state, int32_t value,
     state.accumulator  += std::abs(value);
     state.last_event_ns = timestamp_ns;
 
-    // Leading-edge: first event of a gesture fires immediately
+    // Pending confirmation: a prior gesture-start event is waiting for a
+    // same-direction follow-up within the confirmation window. Ghosts are
+    // isolated events, so they never get confirmed.
+    if (state.pending_dir != 0) {
+        const bool same_dir  = (event_dir == state.pending_dir);
+        const bool in_window = (timestamp_ns - state.pending_ts)
+                               <= p.confirmation_window_ns;
+        state.pending_dir = 0;
+        state.pending_ts  = 0;
+        if (same_dir && in_window) {
+            state.accumulator  = 0;
+            state.last_emit_ns = timestamp_ns;
+            return action_for_direction(event_dir);
+        }
+        // Stale or reverse pending → fall through; treat this event as the
+        // new gesture-start candidate below.
+    }
+
+    // Leading-edge candidate: hold the first event as pending instead of
+    // emitting immediately. The next same-direction event within the window
+    // will confirm it.
     const bool gesture_start = (state.last_emit_ns == 0)
                             || (timestamp_ns - state.last_emit_ns > p.idle_reset_ns);
     if (gesture_start) {
-        state.accumulator  = 0;
-        state.last_emit_ns = timestamp_ns;
-        return action_for_direction(event_dir);
+        state.pending_dir = event_dir;
+        state.pending_ts  = timestamp_ns;
+        return ActionResult::None;
     }
 
     // Cooldown: same-gesture emissions must be spaced by emit_cooldown_ns
