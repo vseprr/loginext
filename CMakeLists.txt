@@ -18,6 +18,8 @@ add_executable(loginext
     src/core/event_loop.cpp
     src/core/pacer.cpp
     src/heuristics/scroll_state.cpp
+    src/ipc/server.cpp
+    src/ipc/dispatch.cpp
 )
 
 target_include_directories(loginext PRIVATE

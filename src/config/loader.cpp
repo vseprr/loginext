@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
+#include <pwd.h>
 #include <string_view>
 #include <unistd.h>
 
@@ -14,6 +15,17 @@ std::string default_config_path() {
     if (const char* xdg = std::getenv("XDG_CONFIG_HOME"); xdg && *xdg) {
         return std::string(xdg) + "/loginext/config.json";
     }
+
+    // Under sudo, $HOME points to /root. Resolve the invoking user's
+    // home from the password database so the daemon and UI agree.
+    const char* sudo_uid = std::getenv("SUDO_UID");
+    if (sudo_uid && *sudo_uid) {
+        uid_t uid = static_cast<uid_t>(std::strtoul(sudo_uid, nullptr, 10));
+        if (struct passwd* pw = getpwuid(uid)) {
+            return std::string(pw->pw_dir) + "/.config/loginext/config.json";
+        }
+    }
+
     if (const char* home = std::getenv("HOME"); home && *home) {
         return std::string(home) + "/.config/loginext/config.json";
     }

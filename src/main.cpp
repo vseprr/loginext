@@ -6,12 +6,15 @@
 #include "core/event_loop.hpp"
 #include "core/pacer.hpp"
 #include "heuristics/scroll_state.hpp"
+#include "ipc/dispatch.hpp"
+#include "ipc/server.hpp"
 
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
 #include <linux/input.h>
 #include <string>
+#include <sys/epoll.h>
 
 namespace {
 
@@ -38,6 +41,9 @@ struct AppContext {
     loginext::heuristics::ScrollState scroll;
     loginext::core::PacingQueue       pacer;
     loginext::core::EmitterHandle     emitter;
+    loginext::ipc::IpcServer          ipc;
+    loginext::ipc::DispatchCtx        ipc_ctx;
+    int                               epoll_fd = -1;  // mirror of EventLoop's for ipc dispatch
 };
 
 void on_event(const input_event& ev, void* ctx) {
@@ -52,6 +58,8 @@ void on_event(const input_event& ev, void* ctx) {
         auto result = loginext::heuristics::process_hwheel(app->scroll, value, ts,
                                                            app->settings.profile);
         if (result != loginext::heuristics::ActionResult::None) {
+            std::fprintf(stderr, "[ev-trace]   -> EMIT %s\n",
+                         result == loginext::heuristics::ActionResult::TabNext ? "TabNext" : "TabPrev");
             loginext::core::enqueue_action(app->pacer, result, ts);
         }
 
@@ -60,13 +68,8 @@ void on_event(const input_event& ev, void* ctx) {
     }
 
     // Everything else → passthrough to virtual mouse
-    if (ev.type == EV_SYN) {
-        // Don't re-emit SYN_DROPPED — it signals physical-device buffer overrun,
-        // not relevant on the virtual device.
-        if (ev.code != SYN_DROPPED) {
-            loginext::core::emit_passthrough(app->emitter, ev);
-        }
-    } else if (ev.type == EV_REL || ev.type == EV_KEY || ev.type == EV_MSC) {
+    if (ev.type == EV_SYN || ev.type == EV_REL || ev.type == EV_KEY ||
+        ev.type == EV_MSC) {
         loginext::core::emit_passthrough(app->emitter, ev);
     }
 }
@@ -78,7 +81,8 @@ void on_timer(void* ctx) {
 
 void on_reload(void* ctx) {
     auto* app = static_cast<AppContext*>(ctx);
-    if (loginext::config::load_settings(app->config_path, app->settings)) {
+    bool ok = loginext::config::load_settings(app->config_path, app->settings);
+    if (ok) {
         std::fprintf(stderr, "[loginext] config reloaded: mode=%s invert=%s\n",
                      loginext::config::mode_name(app->settings.mode),
                      app->settings.invert_hwheel ? "true" : "false");
@@ -87,6 +91,22 @@ void on_reload(void* ctx) {
     }
     // Reset gesture state so the next event starts a clean leading-edge emit
     app->scroll = {};
+
+    // Send the deferred ack to the UI client that requested this reload.
+    loginext::ipc::send_reload_ack(app->ipc_ctx, ok);
+}
+
+// Dispatcher for every fd epoll wakes up on that isn't the device or the
+// pacer timer. Today that's just the IPC listener + client sockets.
+void on_io(int fd, void* ctx) {
+    auto* app = static_cast<AppContext*>(ctx);
+    if (fd == app->ipc.listen_fd) {
+        loginext::ipc::on_accept(app->ipc, app->epoll_fd);
+    } else if (loginext::ipc::owns_fd(app->ipc, fd)) {
+        loginext::ipc::on_client_readable_fd(app->ipc, fd, app->epoll_fd,
+                                             loginext::ipc::dispatch_with_fd,
+                                             &app->ipc_ctx);
+    }
 }
 
 } // namespace
@@ -134,6 +154,9 @@ int main(int argc, char* argv[]) {
     sigemptyset(&sa_hup.sa_mask);
     sigaction(SIGHUP, &sa_hup, nullptr);
 
+    // Ignore SIGPIPE so a disconnected UI client mid-write() never terminates us.
+    signal(SIGPIPE, SIG_IGN);
+
     // --- Init ---
     auto dev = loginext::core::find_device();
     if (!dev.valid()) {
@@ -175,6 +198,21 @@ int main(int argc, char* argv[]) {
         return EXIT_FAILURE;
     }
 
+    // IPC bring-up. A failure here is non-fatal: the daemon still does its
+    // primary job (tab switching) even if the UI channel is dead.
+    app.epoll_fd = loop.epoll_fd;
+    app.ipc_ctx  = { &app.settings, &g_reload };
+
+    if (loginext::ipc::init_server(app.ipc) == 0) {
+        epoll_event ev{};
+        ev.events  = EPOLLIN;
+        ev.data.fd = app.ipc.listen_fd;
+        if (epoll_ctl(loop.epoll_fd, EPOLL_CTL_ADD, app.ipc.listen_fd, &ev) < 0) {
+            std::fprintf(stderr, "[loginext] ipc: epoll add listener failed — UI disabled\n");
+            loginext::ipc::shutdown_server(app.ipc);
+        }
+    }
+
     std::fprintf(stderr, "[loginext] running — SIGHUP reloads config, Ctrl+C to stop\n");
 
     // --- Hot path (zero heap allocations from here) ---
@@ -182,9 +220,11 @@ int main(int argc, char* argv[]) {
                              &g_stop, &g_reload,
                              on_event,  &app,
                              on_timer,  &app,
-                             on_reload, &app);
+                             on_reload, &app,
+                             on_io,     &app);
 
     // --- Teardown (reverse order of init) ---
+    loginext::ipc::shutdown_server(app.ipc);
     loginext::core::shutdown_loop(loop);
     loginext::core::destroy_pacer(app.pacer);
     loginext::core::destroy_emitter(app.emitter);

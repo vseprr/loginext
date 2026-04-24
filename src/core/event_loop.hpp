@@ -13,6 +13,9 @@ namespace loginext::core {
 using EventCallback  = void(*)(const input_event& ev, void* ctx);
 using TimerCallback  = void(*)(void* ctx);
 using ReloadCallback = void(*)(void* ctx);
+// Catch-all for fds the event loop itself does not own (e.g. IPC listener,
+// IPC client sockets). Invoked once per epoll wake-up that mentions `fd`.
+using IoCallback     = void(*)(int fd, void* ctx);
 
 struct EventLoop {
     int epoll_fd = -1;
@@ -34,7 +37,8 @@ void run_loop(EventLoop& loop, int device_fd, void* evdev,
               volatile sig_atomic_t* reload,
               EventCallback  event_cb,  void* event_ctx,
               TimerCallback  timer_cb,  void* timer_ctx,
-              ReloadCallback reload_cb, void* reload_ctx) noexcept;
+              ReloadCallback reload_cb, void* reload_ctx,
+              IoCallback     io_cb,     void* io_ctx) noexcept;
 
 // Close the epoll fd.
 void shutdown_loop(EventLoop& loop) noexcept;

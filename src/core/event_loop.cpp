@@ -49,7 +49,8 @@ void run_loop(EventLoop& loop, int device_fd, void* evdev_raw,
               volatile sig_atomic_t* reload,
               EventCallback  event_cb,  void* event_ctx,
               TimerCallback  timer_cb,  void* timer_ctx,
-              ReloadCallback reload_cb, void* reload_ctx) noexcept {
+              ReloadCallback reload_cb, void* reload_ctx,
+              IoCallback     io_cb,     void* io_ctx) noexcept {
 
     auto* evdev = static_cast<libevdev*>(evdev_raw);
     constexpr int timeout_ms = -1;
@@ -90,6 +91,11 @@ void run_loop(EventLoop& loop, int device_fd, void* evdev_raw,
                 }
             } else if (fd == loop.timer_fd) {
                 timer_cb(timer_ctx);
+            } else if (io_cb) {
+                // Foreign fd (IPC listener / client) — dispatch to the
+                // generic handler. Kept off the hot path deliberately: the
+                // device and timer branches above are checked first.
+                io_cb(fd, io_ctx);
             }
         }
     }
