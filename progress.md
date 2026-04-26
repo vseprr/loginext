@@ -30,7 +30,6 @@ For implementation rules see [agents.md](./agents.md). For active performance di
 
 ### Phase 2.4 — Tab-nav preset polish
 - [ ] Preset selector dropdown (Navigate-between-tabs is currently the only entry; needs a chooser when other presets land — daemon side is ready, see `presets/preset.hpp` + `Settings::active_preset`).
-- [x] **REMOVED / CANCELED** — Optional continuous slider alternative to the Low/Medium/High segmented control. Three precisely-tuned profiles (Low/Medium/High) are the contract; a continuous slider would dilute the tuning surface and the UI gains nothing the segmented control doesn't already give.
 - [ ] Live preview overlay: stream emitted Tab events back to the UI while the window is open (multi-message IPC channel — currently every request is one round-trip).
 
 ### Phase 2.5 — Scope: global vs per-app
