@@ -18,20 +18,7 @@ use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::time::Duration;
 
-// Avoid pulling the `libc` crate for a single getuid() call.
-extern "C" {
-    fn getuid() -> u32;
-}
-
-fn socket_path() -> PathBuf {
-    if let Ok(xdg) = std::env::var("XDG_RUNTIME_DIR") {
-        if !xdg.is_empty() {
-            return PathBuf::from(format!("{xdg}/loginext.sock"));
-        }
-    }
-    let uid = unsafe { getuid() };
-    PathBuf::from(format!("/tmp/loginext-{uid}.sock"))
-}
+use crate::daemon;
 
 fn err_json(msg: &str) -> String {
     // Escape only the double quote — dispatch.cpp never produces raw newlines
@@ -47,7 +34,7 @@ pub fn request(mut line: String) -> String {
         line.push('\n');
     }
 
-    let path = socket_path();
+    let path = daemon::socket_path();
     let stream = match UnixStream::connect(&path) {
         Ok(s) => s,
         Err(e) => return err_json(&format!("connect({}): {}", path.display(), e)),

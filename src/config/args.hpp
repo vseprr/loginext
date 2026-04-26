@@ -8,11 +8,13 @@ namespace loginext::config {
 
 struct CliOptions {
     std::string     config_path;      // empty → default_config_path()
-    SensitivityMode mode = SensitivityMode::Low;
+    SensitivityMode mode = SensitivityMode::Medium;
     bool            invert_hwheel = true;
     bool            cli_mode_set = false;
     bool            cli_invert_set = false;
     bool            help = false;
+    bool            quiet = false;    // suppress stderr (file log still active)
+    bool            verbose = false;  // lower file-log threshold to Trace
 };
 
 // Returns 0 on success, nonzero on error. Prints usage on --help or error.

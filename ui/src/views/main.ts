@@ -7,10 +7,11 @@ import { ipc, type SettingsResponse, type DevicesResponse,
 type Mode = "low" | "medium" | "high";
 
 // Current state — mutated by IPC fetch and user actions.
-// Default matches the daemon's default profile so pre-fetch clicks on the
-// highlighted segment don't fire a redundant apply.
-let currentMode: Mode = "medium";
-let currentInvert = true;
+// Sentinel `null` until the first daemon round-trip completes — keeps the
+// segmented control unselected during the initial paint so the user never
+// sees a wrong highlight flash to the right one.
+let currentMode: Mode | null = null;
+let currentInvert: boolean | null = null;
 let applying = false;
 // Cached last-applied tuple — avoids a redundant write+reload when the user
 // clicks the already-active mode after state sync.
@@ -48,15 +49,20 @@ function showToast(message: string, type: "success" | "error" = "success") {
 
 async function applyCurrentSettings() {
   if (applying) return;
-  // Skip redundant apply when the new tuple matches the last one we wrote.
-  // Prevents a needless write+reload cycle after initial state sync.
-  if (currentMode === lastAppliedMode && currentInvert === lastAppliedInvert) return;
+  // If the user interacted before the initial fetch completed, fall back to
+  // the daemon's documented defaults for the side they didn't touch. Avoids
+  // dropping the click without risking a wrong-value write.
+  const mode   = currentMode   ?? "medium";
+  const invert = currentInvert ?? true;
+  if (mode === lastAppliedMode && invert === lastAppliedInvert) return;
   applying = true;
   try {
-    const result = await ipc.applySettings(currentMode, currentInvert);
+    const result = await ipc.applySettings(mode, invert);
     if (result.ok) {
-      lastAppliedMode = currentMode;
-      lastAppliedInvert = currentInvert;
+      currentMode       = mode;
+      currentInvert     = invert;
+      lastAppliedMode   = mode;
+      lastAppliedInvert = invert;
       showToast("Settings applied ✓", "success");
     } else {
       showToast(`Reload failed: ${result.err}`, "error");
@@ -330,13 +336,16 @@ function presetColumn(): HTMLElement {
   sensLabel.className = "section-label";
   sensLabel.textContent = "Sensitivity";
 
+  // No initial highlight — `value` deliberately omitted so all options paint
+  // as inactive on first frame. `fetchInitialState()` selects the right one
+  // after the first daemon round-trip; eliminates the "default flashes before
+  // correct value" flicker users used to see.
   segmentedEl = segmented<Mode>({
     options: [
       { value: "low",    label: "Low" },
       { value: "medium", label: "Medium" },
       { value: "high",   label: "High" },
     ],
-    value: currentMode,
     onChange: (m) => {
       currentMode = m;
       void applyCurrentSettings();
@@ -359,7 +368,8 @@ function presetColumn(): HTMLElement {
   invDesc.textContent = "Reverse scroll direction";
 
   toggleEl = toggle({
-    checked: currentInvert,
+    // Same rationale as segmented above — render unchecked, sync after fetch.
+    checked: false,
     onChange: (v) => {
       currentInvert = v;
       void applyCurrentSettings();
@@ -377,9 +387,22 @@ function presetColumn(): HTMLElement {
 }
 
 // ── Heartbeat ─────────────────────────────────────────────────────
+//
+// setTimeout chain (not setInterval) so failures can extend the next
+// interval — saves ~12 round-trips/min when the daemon is genuinely down.
+// On every consecutive failure we also fire `daemonRespawn` once, which
+// re-runs the Tauri-side spawn check; succeeds silently if the daemon is
+// already up, otherwise tries to launch it again.
+//
+// Cadence:
+//   - success → 5 s
+//   - failure → 2 s, 4 s, 8 s, 16 s, 30 s (capped)
+
+const HEARTBEAT_OK_MS    = 5_000;
+const HEARTBEAT_MIN_FAIL = 2_000;
+const HEARTBEAT_MAX_FAIL = 30_000;
 
 export async function attachHeartbeat(bar: HTMLElement): Promise<void> {
-  // Add status dot
   const dot = document.createElement("span");
   dot.className = "status-bar__dot";
   bar.prepend(dot);
@@ -387,16 +410,55 @@ export async function attachHeartbeat(bar: HTMLElement): Promise<void> {
   const textEl = document.createElement("span");
   bar.appendChild(textEl);
 
+  // Render the spawn outcome on first paint so the user immediately sees
+  // whether Tauri found, started, or failed to start the daemon.
+  try {
+    const status = await ipc.daemonStatus();
+    if (!status.ok) {
+      bar.className = "status-bar status-bar--warn";
+      textEl.textContent = `daemon: ${status.state}${status.err ? ` (${status.err})` : ""}`;
+    }
+  } catch {
+    // Non-fatal — the heartbeat below will own the status from here.
+  }
+
+  let failures = 0;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+
+  const schedule = (ms: number) => {
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(beat, ms);
+  };
+
   const beat = async () => {
     try {
       const r = await ipc.ping();
-      bar.className = "status-bar " + (r.ok ? "status-bar--ok" : "status-bar--err");
-      textEl.textContent = r.ok ? "daemon: connected" : `daemon: ${r.err}`;
+      if (r.ok) {
+        failures = 0;
+        bar.className = "status-bar status-bar--ok";
+        textEl.textContent = "daemon: connected";
+        schedule(HEARTBEAT_OK_MS);
+        return;
+      }
+      // Daemon answered but reported an error — surface it.
+      failures += 1;
+      bar.className = "status-bar status-bar--err";
+      textEl.textContent = `daemon: ${(r as { err: string }).err}`;
     } catch (e) {
+      failures += 1;
       bar.className = "status-bar status-bar--warn";
       textEl.textContent = `daemon: unreachable (${String(e)})`;
     }
+
+    // First three failures: ask Tauri to re-probe / respawn.  After that we
+    // assume the spawn keeps failing and stop hammering the binary lookup.
+    if (failures <= 3) {
+      try { await ipc.daemonRespawn(); } catch { /* swallow */ }
+    }
+
+    const backoff = Math.min(HEARTBEAT_MIN_FAIL << (failures - 1), HEARTBEAT_MAX_FAIL);
+    schedule(backoff);
   };
+
   await beat();
-  setInterval(beat, 5000);
 }

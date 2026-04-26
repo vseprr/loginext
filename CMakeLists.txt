@@ -20,6 +20,7 @@ add_executable(loginext
     src/heuristics/scroll_state.cpp
     src/ipc/server.cpp
     src/ipc/dispatch.cpp
+    src/util/log.cpp
 )
 
 target_include_directories(loginext PRIVATE

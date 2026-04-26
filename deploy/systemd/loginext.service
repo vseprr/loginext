@@ -1,0 +1,62 @@
+# LogiNext — userspace Logitech daemon
+#
+# This is a *user* unit. Installed and managed via:
+#     systemctl --user daemon-reload
+#     systemctl --user enable --now loginext.service
+#     systemctl --user status loginext.service
+#     journalctl --user -u loginext.service -f
+#
+# By default the UI (`loginext-ui`) spawns the daemon on demand as a detached
+# background process — you do NOT need this unit for the standard workflow.
+# Enable it only if you want the daemon to start at login regardless of
+# whether the UI is opened, or to recover automatically across crashes.
+#
+# Install:
+#     mkdir -p ~/.config/systemd/user
+#     cp deploy/systemd/loginext.service ~/.config/systemd/user/
+#     # If `loginext` is not on $PATH, edit ExecStart= below.
+
+[Unit]
+Description=LogiNext — Logitech device control daemon
+Documentation=https://github.com/vseprr/loginext
+# Wait for the graphical session so $XDG_RUNTIME_DIR exists when we bind the
+# UDS. Falls back gracefully if the user logs in via tty (then the daemon
+# uses /tmp/loginext-<uid>.sock).
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+
+# --quiet routes only Warn/Error to stderr; full Trace/Debug is in
+# $XDG_STATE_HOME/loginext/daemon.log. Drop --quiet if you want journald to
+# capture the same Info-level events as the file log.
+ExecStart=/usr/local/bin/loginext --quiet
+
+# SIGHUP triggers an in-place config reload (no restart, no event-loop drop).
+ExecReload=/bin/kill -HUP $MAINPID
+
+# Restart on crash, but back off so a misconfigured device or missing
+# /dev/uinput doesn't fork-bomb the user session.
+Restart=on-failure
+RestartSec=3
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+# Hardening — most of these are no-ops because the daemon only touches
+# /dev/input, /dev/uinput, and a single config + log file. Belt and braces.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%S/loginext %t/loginext.sock
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+LockPersonality=true
+RestrictRealtime=true
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# loginext-logs — stream the daemon's detailed log file.
+#
+# Usage:
+#   loginext-logs              # tail the live log
+#   loginext-logs -n 200       # show the last 200 lines, then stream
+#   loginext-logs --path       # print the resolved log path and exit
+#   loginext-logs --clear      # truncate the log (asks for confirmation)
+#
+# The daemon writes to $XDG_STATE_HOME/loginext/daemon.log (falls back to
+# $HOME/.local/state/loginext/daemon.log when XDG_STATE_HOME is unset).
+
+set -euo pipefail
+
+state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/loginext"
+log_path="$state_dir/daemon.log"
+
+case "${1:-}" in
+    --path)
+        echo "$log_path"
+        exit 0
+        ;;
+    --clear)
+        if [[ ! -f "$log_path" ]]; then
+            echo "loginext-logs: $log_path does not exist" >&2
+            exit 1
+        fi
+        read -r -p "Truncate $log_path? [y/N] " ans
+        [[ "$ans" == "y" || "$ans" == "Y" ]] || { echo "aborted"; exit 1; }
+        : > "$log_path"
+        echo "loginext-logs: cleared"
+        exit 0
+        ;;
+esac
+
+if [[ ! -f "$log_path" ]]; then
+    echo "loginext-logs: $log_path does not exist yet — start the daemon first." >&2
+    echo "  hint: open the LogiNext UI, or run \`loginext\` directly."             >&2
+    exit 1
+fi
+
+# `tail -F` follows by name (handles log rotation gracefully) and survives
+# truncate. -n forwards through if the user passed it.
+exec tail -F "$@" "$log_path"

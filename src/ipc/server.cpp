@@ -1,4 +1,5 @@
 #include "ipc/server.hpp"
+#include "util/log.hpp"
 
 #include <cerrno>
 #include <cstdio>
@@ -78,19 +79,18 @@ void write_line(int fd, const char* body, size_t n) noexcept {
 
 int init_server(IpcServer& s) noexcept {
     if (!resolve_socket_path(s.sock_path)) {
-        std::fprintf(stderr, "[loginext] ipc: cannot resolve socket path\n");
+        LX_ERROR("ipc: cannot resolve socket path");
         return -1;
     }
 
     // Stale socket from a previous crash — best-effort cleanup. Ignore ENOENT.
     if (unlink(s.sock_path) < 0 && errno != ENOENT) {
-        std::fprintf(stderr, "[loginext] ipc: stale socket unlink failed: %s\n",
-                     std::strerror(errno));
+        LX_WARN("ipc: stale socket unlink failed: %s", std::strerror(errno));
     }
 
     s.listen_fd = socket(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
     if (s.listen_fd < 0) {
-        std::fprintf(stderr, "[loginext] ipc: socket() failed: %s\n", std::strerror(errno));
+        LX_ERROR("ipc: socket() failed: %s", std::strerror(errno));
         return -1;
     }
 
@@ -99,8 +99,7 @@ int init_server(IpcServer& s) noexcept {
     std::strncpy(addr.sun_path, s.sock_path, sizeof(addr.sun_path) - 1);
 
     if (bind(s.listen_fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
-        std::fprintf(stderr, "[loginext] ipc: bind(%s) failed: %s\n",
-                     s.sock_path, std::strerror(errno));
+        LX_ERROR("ipc: bind(%s) failed: %s", s.sock_path, std::strerror(errno));
         close(s.listen_fd);
         s.listen_fd = -1;
         return -1;
@@ -108,8 +107,7 @@ int init_server(IpcServer& s) noexcept {
 
     // Restrict to user — UDS respects filesystem perms.
     if (chmod(s.sock_path, 0600) < 0) {
-        std::fprintf(stderr, "[loginext] ipc: chmod(%s) failed: %s\n",
-                     s.sock_path, std::strerror(errno));
+        LX_WARN("ipc: chmod(%s) failed: %s", s.sock_path, std::strerror(errno));
     }
 
     // Under sudo the socket is owned by root. Transfer ownership to the
@@ -122,20 +120,20 @@ int init_server(IpcServer& s) noexcept {
                    ? static_cast<gid_t>(std::strtoul(sudo_gid, nullptr, 10))
                    : uid;
         if (chown(s.sock_path, uid, gid) < 0) {
-            std::fprintf(stderr, "[loginext] ipc: chown(%s, %u, %u) failed: %s\n",
-                         s.sock_path, uid, gid, std::strerror(errno));
+            LX_WARN("ipc: chown(%s, %u, %u) failed: %s",
+                    s.sock_path, uid, gid, std::strerror(errno));
         }
     }
 
     if (listen(s.listen_fd, max_clients) < 0) {
-        std::fprintf(stderr, "[loginext] ipc: listen() failed: %s\n", std::strerror(errno));
+        LX_ERROR("ipc: listen() failed: %s", std::strerror(errno));
         close(s.listen_fd);
         s.listen_fd = -1;
         unlink(s.sock_path);
         return -1;
     }
 
-    std::fprintf(stderr, "[loginext] ipc: listening on %s\n", s.sock_path);
+    LX_DEBUG("ipc: listening on %s", s.sock_path);
     return 0;
 }
 
@@ -170,14 +168,13 @@ void on_accept(IpcServer& s, int epoll_fd) noexcept {
         if (cfd < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) return;
             if (errno == EINTR) continue;
-            std::fprintf(stderr, "[loginext] ipc: accept4 failed: %s\n", std::strerror(errno));
+            LX_WARN("ipc: accept4 failed: %s", std::strerror(errno));
             return;
         }
 
         int slot = find_free_slot(s);
         if (slot < 0) {
-            std::fprintf(stderr, "[loginext] ipc: client rejected — all %d slots full\n",
-                         max_clients);
+            LX_WARN("ipc: client rejected — all %d slots full", max_clients);
             close(cfd);
             continue;
         }
@@ -186,8 +183,7 @@ void on_accept(IpcServer& s, int epoll_fd) noexcept {
         ev.events  = EPOLLIN;  // level-triggered; simpler framing
         ev.data.fd = cfd;
         if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, cfd, &ev) < 0) {
-            std::fprintf(stderr, "[loginext] ipc: epoll add client failed: %s\n",
-                         std::strerror(errno));
+            LX_WARN("ipc: epoll add client failed: %s", std::strerror(errno));
             close(cfd);
             continue;
         }

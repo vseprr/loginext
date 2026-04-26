@@ -13,9 +13,12 @@ void print_usage(const char* prog) {
         "  --mode=MODE       low | medium | high  (overrides config file)\n"
         "  --invert=BOOL     true | false         (overrides config file)\n"
         "  --config=PATH     path to JSON config  (default: $XDG_CONFIG_HOME/loginext/config.json)\n"
+        "  --quiet           suppress stderr (file log keeps running)\n"
+        "  --verbose         file log includes per-event traces\n"
         "  --help            show this message\n"
         "\n"
-        "SIGHUP reloads the config file without restarting.\n",
+        "SIGHUP reloads the config file without restarting.\n"
+        "Detailed logs: tail -f $XDG_STATE_HOME/loginext/daemon.log\n",
         prog);
 }
 
@@ -38,16 +41,18 @@ bool parse_bool(const char* arg, bool& out) {
 
 int parse_args(int argc, char* argv[], CliOptions& out) {
     static const option long_opts[] = {
-        {"mode",   required_argument, nullptr, 'm'},
-        {"invert", required_argument, nullptr, 'i'},
-        {"config", required_argument, nullptr, 'c'},
-        {"help",   no_argument,       nullptr, 'h'},
+        {"mode",    required_argument, nullptr, 'm'},
+        {"invert",  required_argument, nullptr, 'i'},
+        {"config",  required_argument, nullptr, 'c'},
+        {"quiet",   no_argument,       nullptr, 'q'},
+        {"verbose", no_argument,       nullptr, 'v'},
+        {"help",    no_argument,       nullptr, 'h'},
         {nullptr, 0, nullptr, 0},
     };
 
     int c;
     int idx = 0;
-    while ((c = getopt_long(argc, argv, "m:i:c:h", long_opts, &idx)) != -1) {
+    while ((c = getopt_long(argc, argv, "m:i:c:qvh", long_opts, &idx)) != -1) {
         switch (c) {
             case 'm':
                 if (!parse_mode(optarg, out.mode)) {
@@ -65,6 +70,12 @@ int parse_args(int argc, char* argv[], CliOptions& out) {
                 break;
             case 'c':
                 out.config_path = optarg;
+                break;
+            case 'q':
+                out.quiet = true;
+                break;
+            case 'v':
+                out.verbose = true;
                 break;
             case 'h':
                 out.help = true;

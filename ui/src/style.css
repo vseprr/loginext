@@ -1,16 +1,20 @@
 /*
- * LogiNext — Dark Neumorphism design system.
+ * LogiNext — True Soft Neumorphism (dark variant).
  *
- * Inspired by 3D soft-emboss / deboss design language:
- *  - Deep layered shadows for the "raised" illusion on dark surfaces
- *  - Inset shadows for "pressed" / track states
- *  - Accent glow halo behind active elements (toggle on, selected segment)
- *  - Rounded corners everywhere — nothing sharp
- *  - Subtle ambient pulse on active glow for a living feel
- *
- * Surface: layered graphite (#1e1f24 bg / #262830 card / #2d2f38 hi)
- * Shadows: dark outer + thin top highlight (rgba(255,255,255,0.04–0.06))
- * Accent : #6c7cff indigo-violet glow
+ * Design principles (read before editing):
+ *   1. Surfaces share the page background. Elements emerge purely from the
+ *      dual-shadow pair (one darker, one lighter than the surface). No solid
+ *      "card colour" — it would defeat the embossed illusion.
+ *   2. Every interactive element keeps its own footprint. The segmented
+ *      control is a row of individually-raised pills with breathing room
+ *      between them — never a single pressed track with internal options.
+ *   3. Active / pressed = deep debossed inset shadow. Inactive = soft raised
+ *      outset shadow. Hover lifts a touch (slightly larger outset + accent
+ *      glow halo); pressed mirrors the inset state.
+ *   4. Corners are generous and uniform. Pills are 999px; cards 32px; small
+ *      tiles 22px. Hard 90° angles are forbidden in this aesthetic.
+ *   5. Animations only on `box-shadow`, `transform`, `color`, `background` —
+ *      never `all`, never layout properties.
  */
 
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
@@ -18,39 +22,66 @@
 /* ─── Design tokens ──────────────────────────────────────────────── */
 
 :root {
+  /* Surfaces all share the same charcoal — depth comes from shadow only. */
   --bg:             #1e1f24;
-  --bg-deep:        #16171b;
-  --surface:        #262830;
-  --surface-hi:     #2d2f38;
-  --surface-deep:   #1a1b20;
-  --surface-hover:  #30323c;
+  --surface:        #1e1f24;
+  --surface-deep:   #1a1b20;   /* recessed wells: tracks, pressed thumbs */
+  --surface-hi:     #21232a;   /* very subtle bump for hover-only highlights */
 
+  /* Neumorphic shadow pair — calibrated to #1e1f24.                     */
+  /* Dark side ~ -10% luminance, light side ~ +10% luminance. Both kept   */
+  /* low-saturation so the embossed illusion never tints into purple.    */
+  --neu-dark:       #131418;
+  --neu-light:      #292b34;
+
+  /* Soft raised shadow (default outset). Use on cards, control items,   */
+  /* segmented option pills. Sized so a small element still reads 3D.    */
+  --neu-out: 7px 7px 18px var(--neu-dark),
+            -7px -7px 18px var(--neu-light);
+
+  --neu-out-sm: 4px 4px 10px var(--neu-dark),
+               -4px -4px 10px var(--neu-light);
+
+  --neu-out-xs: 2px 2px 6px var(--neu-dark),
+               -2px -2px 6px var(--neu-light);
+
+  --neu-out-lg: 12px 12px 28px var(--neu-dark),
+               -12px -12px 28px var(--neu-light);
+
+  /* Debossed inset shadow (pressed / active). Same shadow recipe but    */
+  /* swung inwards — produces the "scooped into the surface" feel.       */
+  --neu-in: inset 5px 5px 12px var(--neu-dark),
+            inset -5px -5px 12px var(--neu-light);
+
+  --neu-in-sm: inset 3px 3px 7px var(--neu-dark),
+               inset -3px -3px 7px var(--neu-light);
+
+  /* Hover lift — slightly larger outset with an accent halo overlay.    */
+  --neu-hover: 9px 9px 22px var(--neu-dark),
+              -9px -9px 22px var(--neu-light),
+               0 0 18px var(--accent-glow-sm);
+
+  /* Typography. */
   --text:           #e7e8ee;
   --text-dim:       #9093a0;
   --text-faint:     #60636f;
   --text-accent:    #a0acff;
 
+  /* Accent — used sparingly: active text, primary thumb, focus ring. */
   --accent:         #6c7cff;
   --accent-soft:    #4853c4;
   --accent-deep:    #3a44a0;
   --accent-glow:    rgba(108, 124, 255, 0.35);
-  --accent-glow-lg: rgba(108, 124, 255, 0.22);
-  --accent-glow-sm: rgba(108, 124, 255, 0.12);
+  --accent-glow-sm: rgba(108, 124, 255, 0.14);
 
-  --shadow-dark:    rgba(0, 0, 0, 0.55);
-  --shadow-darker:  rgba(0, 0, 0, 0.70);
-  --shadow-darkest: rgba(0, 0, 0, 0.85);
-  --highlight:      rgba(255, 255, 255, 0.04);
-  --highlight-hi:   rgba(255, 255, 255, 0.06);
-  --highlight-edge: rgba(255, 255, 255, 0.08);
-
-  --radius-sm:      12px;
-  --radius-md:      18px;
-  --radius-lg:      24px;
-  --radius-xl:      30px;
-  --radius-card:    28px;   /* outer card softness — matches inner pills */
+  /* Radius scale — never below 14px for tappable surfaces. */
+  --radius-sm:      14px;
+  --radius-md:      22px;
+  --radius-lg:      28px;
+  --radius-card:    32px;
   --radius-pill:    999px;
 
+  /* Spacing scale (same as before — proportions still work). */
   --space-1:        4px;
   --space-2:        8px;
   --space-3:        12px;
@@ -63,7 +94,7 @@
   --font-mono:      "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
 
   --transition-fast: 160ms cubic-bezier(.4, .1, .2, 1);
-  --transition-med:  260ms cubic-bezier(.4, .0, .2, 1);
+  --transition-med:  280ms cubic-bezier(.4, .0, .2, 1);
 }
 
 *, *::before, *::after { box-sizing: border-box; }
@@ -82,24 +113,18 @@ html, body {
   overflow: hidden;
 }
 
-/* ─── Core neumorphic primitives ─────────────────────────────────── */
+/* ─── Core neumorphic primitives (composable utility classes) ─────── */
 
-.raised {
+.neu-raised {
   background: var(--surface);
-  border-radius: var(--radius-lg);
-  box-shadow:
-      6px  6px 16px var(--shadow-darker),
-     -6px -6px 16px rgba(50, 53, 65, 0.15),
-      inset 0  1px 0  var(--highlight-hi),
-      inset 0 -1px 0  rgba(0, 0, 0, 0.2);
+  border-radius: var(--radius-md);
+  box-shadow: var(--neu-out);
 }
 
-.pressed {
-  background: var(--surface-deep);
-  border-radius: var(--radius-lg);
-  box-shadow:
-      inset 4px  4px 10px var(--shadow-darkest),
-      inset -2px -2px 6px rgba(50, 53, 65, 0.10);
+.neu-pressed {
+  background: var(--surface);
+  border-radius: var(--radius-md);
+  box-shadow: var(--neu-in);
 }
 
 /* ─── Card ───────────────────────────────────────────────────────── */
@@ -108,103 +133,76 @@ html, body {
   background: var(--surface);
   border-radius: var(--radius-card);
   padding: var(--space-5);
-  box-shadow:
-      8px  8px 20px var(--shadow-darker),
-     -4px -4px 12px rgba(50, 53, 65, 0.12),
-      inset 0  1px 0  var(--highlight-hi),
-      inset 0 -1px 0  rgba(0, 0, 0, 0.25);
-  /* Transition only box-shadow — avoids full-tree invalidation of `all`. */
+  box-shadow: var(--neu-out);
   transition: box-shadow var(--transition-med);
-  /* Promote to its own compositor layer so shadow animations do not repaint
-     the parent. `will-change` is cheap here — there are only 4 cards. */
+  /* Promote — only a handful of cards exist, so this is cheap. */
   will-change: box-shadow;
-}
-
-.card:hover {
-  box-shadow:
-      10px 10px 24px var(--shadow-darker),
-     -5px -5px 14px rgba(50, 53, 65, 0.14),
-      inset 0  1px 0  var(--highlight-hi),
-      inset 0 -1px 0  rgba(0, 0, 0, 0.25),
-      0 0 22px var(--accent-glow-sm);
 }
 
 .card__title {
   font-size: 11px;
   font-weight: 600;
-  letter-spacing: 0.08em;
+  letter-spacing: 0.10em;
   text-transform: uppercase;
   color: var(--text-faint);
   margin: 0 0 var(--space-4) 0;
 }
 
 /* ─── Toggle (3D pill with embossed thumb) ────────────────────────── */
+/*
+ * The track is a debossed well. The thumb is a raised disc that slides
+ * inside it. Active state: track stays debossed, thumb gains an accent
+ * gradient + glow.
+ */
 
 .toggle {
-  --w: 54px;
-  --h: 30px;
+  --w: 56px;
+  --h: 32px;
   width: var(--w);
   height: var(--h);
   border: none;
   padding: 0;
   border-radius: var(--radius-pill);
-  background: var(--surface-deep);
-  box-shadow:
-      inset 3px  3px 8px var(--shadow-darkest),
-      inset -2px -2px 4px rgba(50, 53, 65, 0.12),
-      0  2px 4px var(--shadow-dark);
+  background: var(--surface);
+  box-shadow: var(--neu-in-sm);
   position: relative;
   cursor: pointer;
-  transition: background var(--transition-fast), box-shadow var(--transition-med);
+  transition: box-shadow var(--transition-med);
   flex-shrink: 0;
-}
-
-.toggle:hover {
-  box-shadow:
-      inset 3px  3px 8px var(--shadow-darkest),
-      inset -2px -2px 4px rgba(50, 53, 65, 0.12),
-      0  2px 4px var(--shadow-dark),
-      0 0 14px var(--accent-glow-sm);
-}
-
-.toggle:active .toggle__thumb {
-  /* Tactile press — expand thumb slightly before the slide. */
-  transform: scale(0.94);
-}
-
-.toggle[aria-checked="true"]:active .toggle__thumb {
-  transform: translateX(calc(var(--w) - var(--h))) scale(0.94);
 }
 
 .toggle__thumb {
   position: absolute;
-  top: 3px; left: 3px;
-  width: calc(var(--h) - 6px);
-  height: calc(var(--h) - 6px);
+  top: 4px;
+  left: 4px;
+  width: calc(var(--h) - 8px);
+  height: calc(var(--h) - 8px);
   border-radius: 50%;
-  background: linear-gradient(145deg, #3a3d48, #2a2d36);
-  box-shadow:
-      3px 3px 6px var(--shadow-darker),
-     -1px -1px 3px rgba(50, 53, 65, 0.2),
-      inset 0 1px 0 var(--highlight-edge);
-  transition: transform var(--transition-fast), background var(--transition-fast),
+  background: var(--surface);
+  box-shadow: var(--neu-out-xs);
+  transition: transform var(--transition-fast),
+              background var(--transition-fast),
               box-shadow var(--transition-med);
 }
 
-.toggle[aria-checked="true"] {
-  background: var(--accent-deep);
-  box-shadow:
-      inset 3px  3px 8px rgba(0, 0, 0, 0.5),
-      0 0 18px var(--accent-glow),
-      0 0 40px var(--accent-glow-sm);
+.toggle:hover .toggle__thumb {
+  box-shadow: var(--neu-out-sm);
+}
+
+.toggle:active .toggle__thumb {
+  transform: scale(0.92);
 }
 
 .toggle[aria-checked="true"] .toggle__thumb {
   transform: translateX(calc(var(--w) - var(--h)));
   background: linear-gradient(145deg, var(--accent), var(--accent-soft));
   box-shadow:
-      0 0 10px var(--accent-glow),
-      inset 0 1px 0 rgba(255, 255, 255, 0.15);
+      var(--neu-out-xs),
+      0 0 14px var(--accent-glow);
+}
+
+.toggle[aria-checked="true"]:active .toggle__thumb {
+  transform: translateX(calc(var(--w) - var(--h))) scale(0.92);
 }
 
 /* ─── Slider (pressed track, raised thumb) ───────────────────────── */
@@ -221,10 +219,8 @@ html, body {
   transform: translateY(-50%);
   height: 10px;
   border-radius: var(--radius-pill);
-  background: var(--surface-deep);
-  box-shadow:
-      inset 3px 3px 8px var(--shadow-darkest),
-      inset -2px -2px 4px rgba(50, 53, 65, 0.10);
+  background: var(--surface);
+  box-shadow: var(--neu-in-sm);
   overflow: hidden;
 }
 
@@ -232,7 +228,7 @@ html, body {
   height: 100%;
   width: var(--fill);
   background: linear-gradient(90deg, var(--accent-soft), var(--accent));
-  box-shadow: 0 0 10px var(--accent-glow);
+  box-shadow: 0 0 12px var(--accent-glow);
   transition: width 60ms ease-out;
 }
 
@@ -243,70 +239,66 @@ html, body {
   transform: translate(-50%, -50%);
   left: var(--fill);
   border-radius: 50%;
-  background: linear-gradient(145deg, #3a3d48, #2a2d36);
-  box-shadow:
-      3px 3px 8px var(--shadow-darker),
-     -2px -2px 6px rgba(50, 53, 65, 0.15),
-      inset 0 1px 0 var(--highlight-edge);
+  background: var(--surface);
+  box-shadow: var(--neu-out-sm);
   transition: box-shadow var(--transition-fast);
 }
 
 .slider__thumb:hover {
-  box-shadow:
-      3px 3px 8px var(--shadow-darker),
-     -2px -2px 6px rgba(50, 53, 65, 0.15),
-      inset 0 1px 0 var(--highlight-edge),
-      0 0 12px var(--accent-glow-sm);
+  box-shadow: var(--neu-out-sm), 0 0 14px var(--accent-glow-sm);
 }
 
 /* ─── Segmented control (Low / Medium / High) ────────────────────── */
+/*
+ * Critical departure from the previous design: the wrapper has NO
+ * background and NO box-shadow. Each option is its OWN free-standing
+ * raised pill. Active option flips to a debossed inset — the user's
+ * finger is "pressing it into" the card surface.
+ */
 
 .segmented {
   display: inline-flex;
-  padding: 4px;
-  border-radius: var(--radius-pill);
-  background: var(--surface-deep);
-  box-shadow:
-      inset 3px  3px 8px var(--shadow-darkest),
-      inset -2px -2px 4px rgba(50, 53, 65, 0.10),
-      0 2px 4px var(--shadow-dark);
-  gap: 2px;
+  gap: var(--space-3);
+  padding: var(--space-1) 0;
+  background: transparent;
+  box-shadow: none;
+  border-radius: 0;
 }
 
 .segmented__option {
-  padding: 7px 20px;
+  /* Each pill stands alone. */
+  padding: 9px 22px;
   border-radius: var(--radius-pill);
   border: none;
-  background: transparent;
+  background: var(--surface);
   color: var(--text-dim);
   cursor: pointer;
   font-family: var(--font);
   font-size: 13px;
   font-weight: 500;
-  /* Explicit properties only — `all` would animate text-selection / caret. */
-  transition: color var(--transition-fast), background var(--transition-fast),
-              box-shadow var(--transition-med), transform 120ms ease;
+  box-shadow: var(--neu-out-sm);
+  transition: color var(--transition-fast),
+              box-shadow var(--transition-med),
+              transform 140ms ease;
 }
 
 .segmented__option:hover:not([aria-selected="true"]) {
   color: var(--text);
-  background: rgba(255, 255, 255, 0.04);
-  box-shadow: 0 0 10px var(--accent-glow-sm);
+  box-shadow: var(--neu-out-sm), 0 0 14px var(--accent-glow-sm);
+  transform: translateY(-1px);
 }
 
 .segmented__option:active:not([aria-selected="true"]) {
-  transform: scale(0.97);
+  transform: translateY(0) scale(0.97);
+  box-shadow: var(--neu-in-sm);
 }
 
 .segmented__option[aria-selected="true"] {
-  color: var(--text);
-  background: var(--surface-hi);
-  box-shadow:
-      3px 3px 8px var(--shadow-darker),
-     -2px -2px 6px rgba(50, 53, 65, 0.12),
-      inset 0 1px 0 var(--highlight-edge),
-      0 0 16px var(--accent-glow),
-      0 0 32px var(--accent-glow-sm);
+  /* Pressed-into-the-card. Accent text, no transform — it's already
+     visually below the card surface. */
+  color: var(--text-accent);
+  background: var(--surface);
+  box-shadow: var(--neu-in-sm);
 }
 
 /* ─── List item / button primitives ──────────────────────────────── */
@@ -316,30 +308,31 @@ html, body {
   align-items: center;
   gap: var(--space-3);
   padding: var(--space-3) var(--space-4);
-  border-radius: var(--radius-lg);
+  border-radius: var(--radius-md);
   cursor: pointer;
   color: var(--text-dim);
-  transition: color var(--transition-fast), background var(--transition-fast),
-              box-shadow var(--transition-med), transform 120ms ease;
+  background: var(--surface);
+  box-shadow: var(--neu-out-sm);
+  transition: color var(--transition-fast),
+              box-shadow var(--transition-med),
+              transform 140ms ease;
 }
 
 .list-item:hover {
   color: var(--text);
-  background: rgba(255, 255, 255, 0.03);
-  box-shadow: 0 0 14px var(--accent-glow-sm);
+  box-shadow: var(--neu-out-sm), 0 0 14px var(--accent-glow-sm);
+  transform: translateY(-1px);
 }
 
-.list-item:active { transform: scale(0.99); }
+.list-item:active {
+  transform: translateY(0) scale(0.99);
+  box-shadow: var(--neu-in-sm);
+}
 
 .list-item[aria-selected="true"] {
-  color: var(--text);
-  background: var(--surface-hi);
-  box-shadow:
-      4px 4px 10px var(--shadow-darker),
-     -2px -2px 6px rgba(50, 53, 65, 0.10),
-      inset 0 1px 0 var(--highlight-edge),
-      0 0 16px var(--accent-glow),
-      0 0 36px var(--accent-glow-sm);
+  color: var(--text-accent);
+  box-shadow: var(--neu-in-sm);
+  transform: none;
 }
 
 /* ─── Embossed icon circle (control visuals) ─────────────────────── */
@@ -351,11 +344,8 @@ html, body {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: linear-gradient(145deg, #2d2f38, #24262e);
-  box-shadow:
-      4px 4px 10px var(--shadow-darker),
-     -2px -2px 6px rgba(50, 53, 65, 0.12),
-      inset 0 1px 0 var(--highlight-edge);
+  background: var(--surface);
+  box-shadow: var(--neu-out-sm);
   flex-shrink: 0;
 }
 
@@ -365,26 +355,10 @@ html, body {
 }
 
 .icon-circle--active {
-  background: linear-gradient(145deg, var(--accent-soft), var(--accent-deep));
+  background: linear-gradient(145deg, var(--accent), var(--accent-soft));
   box-shadow:
-      4px 4px 10px var(--shadow-darker),
-      0 0 18px var(--accent-glow),
-      0 0 40px var(--accent-glow-sm),
-      inset 0 1px 0 rgba(255, 255, 255, 0.12);
-  animation: glow-pulse 3s ease-in-out infinite;
-}
-
-@keyframes glow-pulse {
-  0%, 100% { box-shadow:
-      4px 4px 10px var(--shadow-darker),
-      0 0 18px var(--accent-glow),
-      0 0 40px var(--accent-glow-sm),
-      inset 0 1px 0 rgba(255, 255, 255, 0.12); }
-  50% { box-shadow:
-      4px 4px 10px var(--shadow-darker),
-      0 0 24px var(--accent-glow-lg),
-      0 0 52px var(--accent-glow-sm),
-      inset 0 1px 0 rgba(255, 255, 255, 0.15); }
+      var(--neu-out-sm),
+      0 0 18px var(--accent-glow);
 }
 
 .icon-circle svg {
@@ -392,7 +366,7 @@ html, body {
   height: 20px;
   fill: none;
   stroke: var(--text-dim);
-  stroke-width: 1.5;
+  stroke-width: 1.6;
   stroke-linecap: round;
   stroke-linejoin: round;
 }
@@ -404,11 +378,12 @@ html, body {
 /* ─── Section label (field labels inside cards) ──────────────────── */
 
 .section-label {
-  font-size: 12px;
-  font-weight: 500;
-  letter-spacing: 0.02em;
-  color: var(--text-dim);
-  margin: 0 0 var(--space-2) 0;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  margin: 0 0 var(--space-3) 0;
 }
 
 .section-label:not(:first-of-type) {
@@ -421,26 +396,27 @@ html, body {
   display: flex;
   align-items: center;
   gap: var(--space-3);
-  padding: var(--space-3) var(--space-5);
-  height: 52px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+  padding: var(--space-4) var(--space-5);
+  height: 64px;
   flex-shrink: 0;
 }
 
 .app-header__logo {
-  width: 28px;
-  height: 28px;
+  width: 36px;
+  height: 36px;
   border-radius: var(--radius-sm);
   background: linear-gradient(135deg, var(--accent), var(--accent-soft));
-  box-shadow: 0 0 12px var(--accent-glow-sm);
+  box-shadow:
+      var(--neu-out-xs),
+      0 0 14px var(--accent-glow-sm);
   display: flex;
   align-items: center;
   justify-content: center;
 }
 
 .app-header__logo svg {
-  width: 16px;
-  height: 16px;
+  width: 18px;
+  height: 18px;
   fill: #fff;
 }
 
@@ -454,10 +430,10 @@ html, body {
   font-size: 11px;
   font-weight: 500;
   color: var(--text-faint);
-  padding: 2px 8px;
+  padding: 3px 10px;
   border-radius: var(--radius-pill);
   background: var(--surface);
-  box-shadow: inset 1px 1px 3px var(--shadow-dark);
+  box-shadow: var(--neu-in-sm);
 }
 
 /* ─── App shell (three-column Options+-style layout) ─────────────── */
@@ -472,28 +448,27 @@ html, body {
   flex: 1;
   min-height: 0;
   display: grid;
-  grid-template-columns: 260px 1fr 340px;
-  gap: var(--space-4);
-  padding: var(--space-4) var(--space-5);
+  grid-template-columns: 280px 1fr 360px;
+  gap: var(--space-5);
+  padding: var(--space-3) var(--space-5) var(--space-5);
 }
 
 .app__col {
   display: flex;
   flex-direction: column;
-  gap: var(--space-4);
+  gap: var(--space-5);
   min-height: 0;
   overflow-y: auto;
+  /* Slightly larger inner padding so neumorphic shadows don't get clipped. */
+  padding: 6px;
+  margin: -6px;
 }
 
 /* Scrollbar styling */
-.app__col::-webkit-scrollbar {
-  width: 4px;
-}
-.app__col::-webkit-scrollbar-track {
-  background: transparent;
-}
+.app__col::-webkit-scrollbar { width: 4px; }
+.app__col::-webkit-scrollbar-track { background: transparent; }
 .app__col::-webkit-scrollbar-thumb {
-  background: var(--surface-hi);
+  background: var(--neu-light);
   border-radius: var(--radius-pill);
 }
 
@@ -504,29 +479,31 @@ html, body {
   align-items: center;
   gap: var(--space-3);
   padding: var(--space-3) var(--space-4);
-  border-radius: var(--radius-lg);
+  border-radius: var(--radius-md);
   cursor: pointer;
   color: var(--text-dim);
-  transition: color var(--transition-fast), background var(--transition-fast),
-              box-shadow var(--transition-med), transform 120ms ease;
+  background: var(--surface);
+  box-shadow: var(--neu-out-sm);
+  transition: color var(--transition-fast),
+              box-shadow var(--transition-med),
+              transform 140ms ease;
 }
 
 .device-item:hover {
   color: var(--text);
-  background: rgba(255, 255, 255, 0.03);
-  box-shadow: 0 0 14px var(--accent-glow-sm);
+  box-shadow: var(--neu-out-sm), 0 0 14px var(--accent-glow-sm);
+  transform: translateY(-1px);
 }
 
-.device-item:active { transform: scale(0.99); }
+.device-item:active {
+  transform: translateY(0) scale(0.99);
+  box-shadow: var(--neu-in-sm);
+}
 
 .device-item[aria-selected="true"] {
-  color: var(--text);
-  background: var(--surface-hi);
-  box-shadow:
-      4px 4px 10px var(--shadow-darker),
-     -2px -2px 6px rgba(50, 53, 65, 0.10),
-      inset 0 1px 0 var(--highlight-edge),
-      0 0 14px var(--accent-glow-sm);
+  color: var(--text-accent);
+  box-shadow: var(--neu-in-sm);
+  transform: none;
 }
 
 .device-item__info {
@@ -557,35 +534,32 @@ html, body {
   align-items: center;
   gap: var(--space-4);
   padding: var(--space-4);
-  border-radius: var(--radius-lg);
+  border-radius: var(--radius-md);
   cursor: pointer;
   background: var(--surface);
-  box-shadow:
-      4px 4px 12px var(--shadow-darker),
-     -2px -2px 8px rgba(50, 53, 65, 0.10),
-      inset 0 1px 0 var(--highlight);
-  transition: box-shadow var(--transition-med), transform 120ms ease;
+  box-shadow: var(--neu-out);
+  transition: box-shadow var(--transition-med),
+              transform 140ms ease;
   will-change: transform, box-shadow;
 }
 
 .control-item:hover {
   transform: translateY(-1px);
-  box-shadow:
-      6px 6px 16px var(--shadow-darker),
-     -3px -3px 10px rgba(50, 53, 65, 0.12),
-      inset 0 1px 0 var(--highlight-hi),
-      0 0 18px var(--accent-glow-sm);
+  box-shadow: var(--neu-hover);
 }
 
-.control-item:active { transform: translateY(0) scale(0.995); }
+.control-item:active {
+  transform: translateY(0) scale(0.995);
+  box-shadow: var(--neu-in);
+}
 
 .control-item[aria-selected="true"] {
+  /* Selected control reads as "in focus" — keep raised but with accent halo. */
+  color: var(--text-accent);
   box-shadow:
-      6px 6px 16px var(--shadow-darker),
-     -3px -3px 10px rgba(50, 53, 65, 0.12),
-      inset 0 1px 0 var(--highlight-hi),
-      0 0 18px var(--accent-glow),
-      0 0 36px var(--accent-glow-sm);
+      var(--neu-out),
+      0 0 22px var(--accent-glow);
+  transform: none;
 }
 
 .control-item__info {
@@ -610,15 +584,14 @@ html, body {
   display: flex;
   align-items: center;
   gap: var(--space-3);
-  padding-bottom: var(--space-3);
-  margin-bottom: var(--space-3);
-  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+  padding-bottom: var(--space-4);
+  margin-bottom: var(--space-4);
 }
 
 .preset-header__name {
   font-size: 15px;
   font-weight: 600;
-  color: var(--text-accent);
+  color: var(--text);
 }
 
 /* ─── Settings row (label + control) ─────────────────────────────── */
@@ -644,44 +617,51 @@ html, body {
   font-size: 11px;
   color: var(--text-faint);
   padding: var(--space-2) var(--space-5);
-  border-top: 1px solid rgba(255, 255, 255, 0.03);
   display: flex;
   align-items: center;
   gap: var(--space-2);
   flex-shrink: 0;
-  height: 32px;
+  height: 36px;
 }
 
 .status-bar__dot {
-  width: 6px;
-  height: 6px;
+  width: 8px;
+  height: 8px;
   border-radius: 50%;
   background: var(--text-faint);
+  box-shadow: var(--neu-in-sm);
   flex-shrink: 0;
 }
 
 .status-bar--ok   { color: #8ad18a; }
-.status-bar--ok .status-bar__dot { background: #8ad18a; box-shadow: 0 0 6px rgba(138, 209, 138, 0.4); }
+.status-bar--ok .status-bar__dot {
+  background: #8ad18a;
+  box-shadow: 0 0 8px rgba(138, 209, 138, 0.5);
+}
 .status-bar--warn { color: #e2b06a; }
-.status-bar--warn .status-bar__dot { background: #e2b06a; }
+.status-bar--warn .status-bar__dot {
+  background: #e2b06a;
+  box-shadow: 0 0 8px rgba(226, 176, 106, 0.4);
+}
 .status-bar--err  { color: #e47878; }
-.status-bar--err .status-bar__dot { background: #e47878; }
+.status-bar--err .status-bar__dot {
+  background: #e47878;
+  box-shadow: 0 0 8px rgba(228, 120, 120, 0.4);
+}
 
 /* ─── Feedback toast ─────────────────────────────────────────────── */
 
 .toast {
   position: fixed;
-  bottom: 44px;
+  bottom: 48px;
   right: var(--space-5);
-  padding: var(--space-2) var(--space-4);
+  padding: var(--space-3) var(--space-4);
   border-radius: var(--radius-md);
   font-size: 12px;
   font-weight: 500;
   background: var(--surface);
   color: var(--text);
-  box-shadow:
-      6px 6px 16px var(--shadow-darker),
-      0 0 12px var(--accent-glow-sm);
+  box-shadow: var(--neu-out);
   opacity: 0;
   transform: translateY(8px);
   transition: opacity 200ms ease, transform 200ms ease;
@@ -717,6 +697,10 @@ html, body {
 }
 
 /* ─── Loading shimmer ────────────────────────────────────────────── */
+/*
+ * Used while the daemon's first-fetch round-trip is in flight. Skeleton
+ * surfaces stay flat (no neu shadow) — the moving gradient is the cue.
+ */
 
 @keyframes shimmer {
   0%   { background-position: -200px 0; }
@@ -724,7 +708,7 @@ html, body {
 }
 
 .skeleton {
-  background: linear-gradient(90deg, var(--surface-deep) 25%, var(--surface) 50%, var(--surface-deep) 75%);
+  background: linear-gradient(90deg, var(--surface-deep) 25%, var(--surface-hi) 50%, var(--surface-deep) 75%);
   background-size: 400px 100%;
   animation: shimmer 1.6s ease-in-out infinite;
   border-radius: var(--radius-sm);

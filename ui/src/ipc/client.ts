@@ -71,6 +71,24 @@ export async function applySettings(
   return request("reload");
 }
 
+// Daemon lifecycle envelope returned by the Tauri-side spawn check.
+// `state` is the discriminator; payload fields depend on it.
+export interface DaemonStatus {
+  ok: boolean;
+  state: "already_running" | "spawned" | "spawn_failed" | "binary_not_found" | "timeout";
+  pid?: number;
+  err?: string;
+}
+
+async function invokeDaemon(cmd: "daemon_status" | "daemon_respawn"): Promise<DaemonStatus> {
+  const raw = await invoke<string>(cmd);
+  try {
+    return JSON.parse(raw) as DaemonStatus;
+  } catch {
+    return { ok: false, state: "spawn_failed", err: "bad_response" };
+  }
+}
+
 export const ipc = {
   ping:          () => request("ping"),
   getSettings:   () => request("get_settings") as Promise<SettingsResponse | IpcErr>,
@@ -79,4 +97,7 @@ export const ipc = {
   listPresets:   () => request("list_presets") as Promise<PresetsResponse | IpcErr>,
   reload:        () => request("reload"),
   applySettings,
+  // Lifecycle: report startup outcome + ask Tauri to re-probe / respawn.
+  daemonStatus:  () => invokeDaemon("daemon_status"),
+  daemonRespawn: () => invokeDaemon("daemon_respawn"),
 };

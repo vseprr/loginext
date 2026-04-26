@@ -8,6 +8,7 @@
 #include "heuristics/scroll_state.hpp"
 #include "ipc/dispatch.hpp"
 #include "ipc/server.hpp"
+#include "util/log.hpp"
 
 #include <csignal>
 #include <cstdio>
@@ -58,8 +59,10 @@ void on_event(const input_event& ev, void* ctx) {
         auto result = loginext::heuristics::process_hwheel(app->scroll, value, ts,
                                                            app->settings.profile);
         if (result != loginext::heuristics::ActionResult::None) {
-            std::fprintf(stderr, "[ev-trace]   -> EMIT %s\n",
-                         result == loginext::heuristics::ActionResult::TabNext ? "TabNext" : "TabPrev");
+            // Per-emit traces are file-only — would otherwise spam the
+            // interactive terminal during normal scrolling.
+            LX_TRACE("emit %s",
+                     result == loginext::heuristics::ActionResult::TabNext ? "TabNext" : "TabPrev");
             loginext::core::enqueue_action(app->pacer, result, ts);
         }
 
@@ -83,11 +86,11 @@ void on_reload(void* ctx) {
     auto* app = static_cast<AppContext*>(ctx);
     bool ok = loginext::config::load_settings(app->config_path, app->settings);
     if (ok) {
-        std::fprintf(stderr, "[loginext] config reloaded: mode=%s invert=%s\n",
-                     loginext::config::mode_name(app->settings.mode),
-                     app->settings.invert_hwheel ? "true" : "false");
+        LX_INFO("config reloaded: mode=%s invert=%s",
+                loginext::config::mode_name(app->settings.mode),
+                app->settings.invert_hwheel ? "true" : "false");
     } else {
-        std::fprintf(stderr, "[loginext] SIGHUP: no config changes applied\n");
+        LX_WARN("SIGHUP received but no config changes applied");
     }
     // Reset gesture state so the next event starts a clean leading-edge emit
     app->scroll = {};
@@ -123,6 +126,13 @@ int main(int argc, char* argv[]) {
         return EXIT_SUCCESS;
     }
 
+    // --- Logger init (before anything that might log) ---
+    loginext::util::LogConfig logcfg{};
+    logcfg.stderr_enabled = !cli.quiet;
+    logcfg.file_level = cli.verbose ? loginext::util::LogLevel::Trace
+                                    : loginext::util::LogLevel::Debug;
+    loginext::util::log_init(logcfg);
+
     // --- Settings: file first, then CLI overrides ---
     AppContext app{};
     app.config_path = cli.config_path.empty()
@@ -135,10 +145,13 @@ int main(int argc, char* argv[]) {
     if (cli.cli_invert_set) app.settings.invert_hwheel = cli.invert_hwheel;
     loginext::config::apply_mode(app.settings);
 
-    std::fprintf(stderr, "[loginext] config: mode=%s invert=%s path=%s\n",
-                 loginext::config::mode_name(app.settings.mode),
-                 app.settings.invert_hwheel ? "true" : "false",
-                 app.config_path.empty() ? "(none)" : app.config_path.c_str());
+    LX_INFO("config: mode=%s invert=%s path=%s",
+            loginext::config::mode_name(app.settings.mode),
+            app.settings.invert_hwheel ? "true" : "false",
+            app.config_path.empty() ? "(none)" : app.config_path.c_str());
+    if (loginext::util::log_file_path()[0] != '\0') {
+        LX_INFO("log: %s", loginext::util::log_file_path());
+    }
 
     // --- Signal setup ---
     struct sigaction sa_stop{};
@@ -160,17 +173,20 @@ int main(int argc, char* argv[]) {
     // --- Init ---
     auto dev = loginext::core::find_device();
     if (!dev.valid()) {
-        std::fprintf(stderr, "[loginext] MX Master 3S not found\n");
+        LX_ERROR("MX Master 3S not found — check device is paired and /dev/input/event* is readable");
+        loginext::util::log_shutdown();
         return EXIT_FAILURE;
     }
 
     if (loginext::core::grab_device(dev) < 0) {
         loginext::core::release_device(dev);
+        loginext::util::log_shutdown();
         return EXIT_FAILURE;
     }
 
     if (loginext::core::init_emitter(app.emitter) < 0) {
         loginext::core::release_device(dev);
+        loginext::util::log_shutdown();
         return EXIT_FAILURE;
     }
 
@@ -179,6 +195,7 @@ int main(int argc, char* argv[]) {
     if (loginext::core::init_pacer(app.pacer) < 0) {
         loginext::core::destroy_emitter(app.emitter);
         loginext::core::release_device(dev);
+        loginext::util::log_shutdown();
         return EXIT_FAILURE;
     }
 
@@ -187,6 +204,7 @@ int main(int argc, char* argv[]) {
         loginext::core::destroy_pacer(app.pacer);
         loginext::core::destroy_emitter(app.emitter);
         loginext::core::release_device(dev);
+        loginext::util::log_shutdown();
         return EXIT_FAILURE;
     }
 
@@ -195,6 +213,7 @@ int main(int argc, char* argv[]) {
         loginext::core::destroy_pacer(app.pacer);
         loginext::core::destroy_emitter(app.emitter);
         loginext::core::release_device(dev);
+        loginext::util::log_shutdown();
         return EXIT_FAILURE;
     }
 
@@ -208,12 +227,14 @@ int main(int argc, char* argv[]) {
         ev.events  = EPOLLIN;
         ev.data.fd = app.ipc.listen_fd;
         if (epoll_ctl(loop.epoll_fd, EPOLL_CTL_ADD, app.ipc.listen_fd, &ev) < 0) {
-            std::fprintf(stderr, "[loginext] ipc: epoll add listener failed — UI disabled\n");
+            LX_WARN("ipc: epoll add listener failed — UI channel disabled");
             loginext::ipc::shutdown_server(app.ipc);
+        } else {
+            LX_INFO("ipc: socket %s", app.ipc.sock_path);
         }
     }
 
-    std::fprintf(stderr, "[loginext] running — SIGHUP reloads config, Ctrl+C to stop\n");
+    LX_INFO("running — SIGHUP reloads config, SIGTERM/Ctrl+C to stop");
 
     // --- Hot path (zero heap allocations from here) ---
     loginext::core::run_loop(loop, dev.fd, dev.evdev,
@@ -224,11 +245,13 @@ int main(int argc, char* argv[]) {
                              on_io,     &app);
 
     // --- Teardown (reverse order of init) ---
+    LX_INFO("shutting down");
     loginext::ipc::shutdown_server(app.ipc);
     loginext::core::shutdown_loop(loop);
     loginext::core::destroy_pacer(app.pacer);
     loginext::core::destroy_emitter(app.emitter);
     loginext::core::release_device(dev);
+    loginext::util::log_shutdown();
 
     return EXIT_SUCCESS;
 }

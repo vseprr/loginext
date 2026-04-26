@@ -5,9 +5,9 @@
 namespace loginext::config {
 
 struct Settings {
-    SensitivityMode mode          = SensitivityMode::Low;
+    SensitivityMode mode          = SensitivityMode::Medium;
     bool            invert_hwheel = true;
-    Profile         profile       = profile_low;
+    Profile         profile       = profile_medium;
 };
 
 // Synchronize the profile field with the current mode.
