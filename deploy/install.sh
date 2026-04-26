@@ -76,10 +76,14 @@ cmake --build build --config Release
 ok "daemon built"
 
 # ---- 3. build UI ------------------------------------------------------------
+# We only need the raw binary — `--bundles deb` skips AppImage/RPM packaging
+# (AppImage wants a square icon, and we install via .desktop instead). If the
+# bundler still trips on something cosmetic, tolerate it: the binary is what
+# we care about, and we re-check its presence below.
 step "Building Tauri UI (release)"
 pushd ui >/dev/null
 [[ -d node_modules ]] || npm install
-npm run tauri build
+npm run tauri build -- --bundles deb || warn "tauri bundler exited non-zero — checking the raw binary anyway"
 popd >/dev/null
 
 # Tauri puts the binary at ui/src-tauri/target/release/<bin name from Cargo.toml>.
@@ -117,7 +121,10 @@ Type=Application
 Name=LogiNext
 GenericName=Logitech Device Control
 Comment=Configure Logitech mouse bindings and sensitivity
-Exec=$UI_DST
+# WEBKIT_DISABLE_DMABUF_RENDERER=1 mirrors the dev-time wrapper in
+# ui/package.json; without it webkit2gtk-4.1 crashes on launch on many
+# Wayland sessions (CachyOS included).
+Exec=env WEBKIT_DISABLE_DMABUF_RENDERER=1 $UI_DST
 Icon=$ICON_DST
 Terminal=false
 Categories=Utility;Settings;HardwareSettings;

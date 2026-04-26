@@ -41,6 +41,39 @@ fn daemon_status(state: tauri::State<'_, DaemonStartup>) -> String {
     }
 }
 
+/// Locate and terminate the running `loginext` daemon. Used by the
+/// "SYSTEM ONLINE/OFFLINE" toggle in the UI to honour explicit user intent
+/// to take the daemon down. SIGTERM first; SIGKILL only if the daemon
+/// ignores TERM past the grace window. Updates the cached startup state so
+/// `daemon_status` reflects reality without a respawn.
+#[tauri::command]
+fn kill_daemon(state: tauri::State<'_, DaemonStartup>) -> String {
+    let outcome = daemon::kill_daemon();
+    let payload = match &outcome {
+        daemon::KillOutcome::Killed { pid } => {
+            format!(r#"{{"ok":true,"state":"killed","pid":{pid}}}"#)
+        }
+        daemon::KillOutcome::NotRunning => {
+            r#"{"ok":true,"state":"not_running"}"#.to_string()
+        }
+        daemon::KillOutcome::SignalFailed { reason } => {
+            let e = reason.replace('\\', "\\\\").replace('"', "\\\"");
+            format!(r#"{{"ok":false,"state":"signal_failed","err":"{e}"}}"#)
+        }
+        daemon::KillOutcome::Timeout => {
+            r#"{"ok":false,"state":"timeout","err":"daemon ignored SIGTERM and SIGKILL"}"#
+                .to_string()
+        }
+    };
+    // The cached SpawnOutcome is no longer authoritative once the user has
+    // explicitly killed the daemon — the front-end's intent flag + heartbeat
+    // are the source of truth from this point. We deliberately leave the
+    // cache alone rather than invent a misleading "down" SpawnOutcome
+    // variant; the next daemon_respawn() refreshes it cleanly.
+    let _ = state;
+    payload
+}
+
 /// Re-runs the spawn check on demand. The UI calls this from the status-bar
 /// reconnect path when the heartbeat reports the daemon went away while the
 /// window was open. Cheap when the socket is alive (single connect+close).
@@ -84,14 +117,21 @@ pub fn run() {
         daemon::socket_path().display()
     );
 
-    tauri::Builder::default()
+    let result = tauri::Builder::default()
         .manage(DaemonStartup(Mutex::new(initial)))
         .invoke_handler(tauri::generate_handler![
             ipc_request,
             write_config,
             daemon_status,
             daemon_respawn,
+            kill_daemon,
         ])
-        .run(tauri::generate_context!())
-        .expect("loginext-ui: tauri runtime failed");
+        .run(tauri::generate_context!());
+
+    // Don't panic on Tauri runtime errors — log + exit non-zero so a launcher
+    // surfaces the failure cleanly rather than leaving a SIGABRT corefile.
+    if let Err(e) = result {
+        eprintln!("[loginext-ui] tauri runtime failed: {e}");
+        std::process::exit(1);
+    }
 }

@@ -24,7 +24,13 @@ use std::time::{Duration, Instant};
 extern "C" {
     fn setsid() -> i32;
     fn getuid() -> u32;
+    fn kill(pid: i32, sig: i32) -> i32;
 }
+
+const SIGTERM: i32 = 15;
+const SIGKILL: i32 = 9;
+const KILL_GRACE: Duration = Duration::from_millis(2000);
+const KILL_POLL: Duration = Duration::from_millis(50);
 
 const PROBE_TIMEOUT: Duration = Duration::from_millis(200);
 const SPAWN_WAIT_BUDGET: Duration = Duration::from_millis(3000);
@@ -58,8 +64,14 @@ fn socket_alive(path: &Path) -> bool {
 /// Resolve the daemon binary path. Search order:
 ///   1. $LOGINEXT_DAEMON (absolute path override — used by `cargo tauri dev`)
 ///   2. ../../build/loginext relative to the UI executable (dev workflow)
-///   3. `loginext` on $PATH
-///   4. /usr/local/bin/loginext, /usr/bin/loginext (system install)
+///   3. Sibling: same directory as the UI executable (matches install.sh,
+///      which drops both binaries into ~/.local/bin)
+///   4. `loginext` on $PATH
+///   5. Absolute fallbacks — these MUST cover ~/.local/bin because GUI
+///      launchers (.desktop, gnome-shell, KDE krunner) typically inherit a
+///      minimal PATH that does not include the user's local bin dir.
+///      See: https://specifications.freedesktop.org/basedir-spec — XDG does
+///      not mandate ~/.local/bin be on PATH for graphical sessions.
 fn resolve_daemon_binary() -> Option<PathBuf> {
     if let Ok(p) = std::env::var("LOGINEXT_DAEMON") {
         let path = PathBuf::from(p);
@@ -84,6 +96,17 @@ fn resolve_daemon_binary() -> Option<PathBuf> {
                 break;
             }
         }
+
+        // Sibling check: install.sh puts loginext + loginext-ui in the same
+        // directory (~/.local/bin). When launched from a .desktop file that
+        // dir is rarely on PATH, so this branch is the one that actually
+        // catches a normal install.
+        if let Some(parent) = exe.parent() {
+            let sibling = parent.join("loginext");
+            if sibling.is_file() {
+                return Some(sibling);
+            }
+        }
     }
 
     // PATH lookup — manually walk to avoid pulling the `which` crate.
@@ -99,8 +122,18 @@ fn resolve_daemon_binary() -> Option<PathBuf> {
         }
     }
 
-    for fallback in ["/usr/local/bin/loginext", "/usr/bin/loginext"] {
-        let p = PathBuf::from(fallback);
+    // Absolute fallbacks. Order: user-local first (matches install.sh), then
+    // system paths. ~/.local/bin is expanded from $HOME because GUI sessions
+    // do not always set it on PATH.
+    let mut absolute: Vec<PathBuf> = Vec::with_capacity(4);
+    if let Ok(home) = std::env::var("HOME") {
+        if !home.is_empty() {
+            absolute.push(PathBuf::from(format!("{home}/.local/bin/loginext")));
+        }
+    }
+    absolute.push(PathBuf::from("/usr/local/bin/loginext"));
+    absolute.push(PathBuf::from("/usr/bin/loginext"));
+    for p in absolute {
         if p.is_file() {
             return Some(p);
         }
@@ -152,6 +185,112 @@ fn wait_for_socket(path: &Path) -> bool {
             return false;
         }
         std::thread::sleep(SPAWN_POLL_INTERVAL);
+    }
+}
+
+/// Outcome of `kill_daemon()` — surfaced to the UI so it can decide whether
+/// to flip the toggle or surface an error toast.
+#[derive(Debug, Clone)]
+pub enum KillOutcome {
+    /// At least one `loginext` process was sent SIGTERM and the socket went
+    /// silent within the grace window.
+    Killed { pid: u32 },
+    /// Socket was already cold and no matching process was found — treat as
+    /// success from the UI's perspective.
+    NotRunning,
+    /// Found a process but couldn't deliver the signal (EPERM/ESRCH).
+    SignalFailed { reason: String },
+    /// SIGTERM delivered, but the socket never closed within `KILL_GRACE`.
+    /// We escalate to SIGKILL once before reporting this — a daemon that
+    /// ignores SIGKILL is a kernel-level problem we can't paper over.
+    Timeout,
+}
+
+/// Locate running `loginext` daemons by walking `/proc`. Compares the basename
+/// of `/proc/<pid>/exe` against `loginext` (matches both dev `build/loginext`
+/// and installed `~/.local/bin/loginext`). Skips entries we can't read — a
+/// non-root UI can't see other users' processes anyway.
+fn find_daemon_pids() -> Vec<i32> {
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(s) = name.to_str() else { continue };
+        let Ok(pid) = s.parse::<i32>() else { continue };
+        let exe = entry.path().join("exe");
+        let Ok(target) = std::fs::read_link(&exe) else { continue };
+        if target.file_name().and_then(|n| n.to_str()) == Some("loginext") {
+            out.push(pid);
+        }
+    }
+    out
+}
+
+/// Send SIGTERM to every running `loginext` daemon and wait for the socket
+/// to close. Escalates to SIGKILL if the daemon ignores SIGTERM past the
+/// grace window — the daemon's epoll loop catches SIGTERM via signalfd and
+/// shuts down cleanly, so in practice the escalation path is dead code we
+/// keep for the rare wedge.
+pub fn kill_daemon() -> KillOutcome {
+    let path = socket_path();
+    let pids = find_daemon_pids();
+
+    if pids.is_empty() && !socket_alive(&path) {
+        return KillOutcome::NotRunning;
+    }
+
+    // No PID but the socket is still warm — something is listening that
+    // we don't own (different uid, container). Bail without lying about it.
+    if pids.is_empty() {
+        return KillOutcome::SignalFailed {
+            reason: "socket alive but no matching loginext process found".to_string(),
+        };
+    }
+
+    let primary = pids[0] as u32;
+    let mut last_err: Option<String> = None;
+    for &pid in &pids {
+        let rc = unsafe { kill(pid, SIGTERM) };
+        if rc != 0 {
+            last_err = Some(format!("pid={pid}: {}", io::Error::last_os_error()));
+        }
+    }
+
+    // Poll the socket — once the daemon's epoll loop exits and the listener
+    // is dropped, connect() starts refusing. Cheaper and more reliable than
+    // waitpid(), which wouldn't work anyway since we're not the parent.
+    let deadline = Instant::now() + KILL_GRACE;
+    while Instant::now() < deadline {
+        if !socket_alive(&path) {
+            eprintln!("[loginext-ui] daemon: terminated pid={primary}");
+            return KillOutcome::Killed { pid: primary };
+        }
+        std::thread::sleep(KILL_POLL);
+    }
+
+    // Daemon stuck — escalate. SIGKILL is uncatchable, so if this also fails
+    // it's almost certainly a permission issue.
+    for &pid in &pids {
+        let rc = unsafe { kill(pid, SIGKILL) };
+        if rc != 0 {
+            last_err = Some(format!("pid={pid} SIGKILL: {}", io::Error::last_os_error()));
+        }
+    }
+    let kill_deadline = Instant::now() + KILL_GRACE;
+    while Instant::now() < kill_deadline {
+        if !socket_alive(&path) {
+            eprintln!("[loginext-ui] daemon: SIGKILL'd pid={primary}");
+            return KillOutcome::Killed { pid: primary };
+        }
+        std::thread::sleep(KILL_POLL);
+    }
+
+    if let Some(reason) = last_err {
+        KillOutcome::SignalFailed { reason }
+    } else {
+        KillOutcome::Timeout
     }
 }
 

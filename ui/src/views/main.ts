@@ -26,6 +26,82 @@ const wheelSvg = `<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path 
 
 const tabSvg = `<svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="3"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="9" y1="3" x2="9" y2="9"/></svg>`;
 
+// ── Fatal-state overlay ───────────────────────────────────────────
+//
+// Renders a centered, non-blocking banner when the daemon-side spawn check
+// reports a hard failure (binary_not_found / spawn_failed / timeout). These
+// are states the user must act on — installing the daemon, fixing perms.
+// Transient `unreachable` from a momentary daemon hiccup keeps using the
+// status bar so we don't yell at the user for a 200 ms blip.
+
+let overlayEl: HTMLElement | null = null;
+
+function showFatalOverlay(title: string, detail: string) {
+  if (!overlayEl) {
+    overlayEl = document.createElement("div");
+    overlayEl.className = "daemon-overlay";
+    overlayEl.setAttribute("role", "alert");
+    document.body.appendChild(overlayEl);
+  }
+  overlayEl.innerHTML = "";
+
+  const card = document.createElement("div");
+  card.className = "daemon-overlay__card";
+
+  const h = document.createElement("div");
+  h.className = "daemon-overlay__title";
+  h.textContent = title;
+
+  const p = document.createElement("div");
+  p.className = "daemon-overlay__detail";
+  p.textContent = detail;
+
+  const hint = document.createElement("div");
+  hint.className = "daemon-overlay__hint";
+  hint.textContent =
+    "Try: ./deploy/install.sh, then relaunch. The UI will retry automatically.";
+
+  card.appendChild(h);
+  card.appendChild(p);
+  card.appendChild(hint);
+  overlayEl.appendChild(card);
+  overlayEl.classList.add("daemon-overlay--visible");
+}
+
+function hideFatalOverlay() {
+  if (overlayEl) overlayEl.classList.remove("daemon-overlay--visible");
+}
+
+function applyDaemonStatus(status: { ok: boolean; state: string; err?: string }) {
+  if (status.ok) {
+    hideFatalOverlay();
+    return;
+  }
+  switch (status.state) {
+    case "binary_not_found":
+      showFatalOverlay(
+        "Daemon binary not found",
+        status.err ?? "loginext is not installed where the UI can find it.",
+      );
+      break;
+    case "spawn_failed":
+      showFatalOverlay(
+        "Daemon failed to start",
+        status.err ?? "spawn() returned an error — check permissions on /dev/uinput and /dev/input.",
+      );
+      break;
+    case "timeout":
+      showFatalOverlay(
+        "Daemon did not come up",
+        status.err ?? "The daemon was launched but never opened its socket.",
+      );
+      break;
+    default:
+      // Unknown non-ok states fall through to the status-bar message.
+      hideFatalOverlay();
+  }
+}
+
 // ── Toast system ──────────────────────────────────────────────────
 
 let toastEl: HTMLElement | null = null;
@@ -386,79 +462,216 @@ function presetColumn(): HTMLElement {
   return col;
 }
 
-// ── Heartbeat ─────────────────────────────────────────────────────
+// ── Heartbeat + status toggle ─────────────────────────────────────
 //
-// setTimeout chain (not setInterval) so failures can extend the next
-// interval — saves ~12 round-trips/min when the daemon is genuinely down.
-// On every consecutive failure we also fire `daemonRespawn` once, which
-// re-runs the Tauri-side spawn check; succeeds silently if the daemon is
-// already up, otherwise tries to launch it again.
+// The status bar hosts a single SYSTEM ONLINE/OFFLINE button — the user
+// clicks it to take the daemon up or down. The click flips a sticky flag
+// in localStorage so the intent survives UI restarts: when the user has
+// explicitly stopped the daemon we suppress auto-respawn, otherwise the
+// heartbeat would fight the user's last action.
 //
-// Cadence:
+// Cadence (intent = ON, auto-respawn enabled):
 //   - success → 5 s
 //   - failure → 2 s, 4 s, 8 s, 16 s, 30 s (capped)
+// Cadence (intent = OFF):
+//   - 10 s gentle probe — flips the button to ONLINE if some external
+//     agent (systemd, CLI) brings the daemon up, but never respawns.
 
 const HEARTBEAT_OK_MS    = 5_000;
 const HEARTBEAT_MIN_FAIL = 2_000;
 const HEARTBEAT_MAX_FAIL = 30_000;
+const HEARTBEAT_OFF_MS   = 10_000;
+const FORCED_OFF_KEY     = "daemon_forced_off";
+
+function isForcedOff(): boolean {
+  try { return localStorage.getItem(FORCED_OFF_KEY) === "true"; }
+  catch { return false; }
+}
+
+function setForcedOff(value: boolean): void {
+  try {
+    if (value) localStorage.setItem(FORCED_OFF_KEY, "true");
+    else localStorage.removeItem(FORCED_OFF_KEY);
+  } catch { /* private mode / disabled storage — fall through */ }
+}
+
+type ButtonState = "online" | "offline" | "pending";
+
+interface StatusButton {
+  el: HTMLButtonElement;
+  set: (s: ButtonState) => void;
+}
+
+function createStatusButton(): StatusButton {
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "status-toggle status-toggle--pending";
+  btn.setAttribute("aria-pressed", "false");
+
+  const dot = document.createElement("span");
+  dot.className = "status-toggle__dot";
+  const label = document.createElement("span");
+  label.className = "status-toggle__label";
+  label.textContent = "CONNECTING…";
+
+  btn.appendChild(dot);
+  btn.appendChild(label);
+
+  const set = (s: ButtonState) => {
+    btn.classList.remove(
+      "status-toggle--online",
+      "status-toggle--offline",
+      "status-toggle--pending",
+    );
+    btn.classList.add(`status-toggle--${s}`);
+    if (s === "online")  { label.textContent = "SYSTEM ONLINE";  btn.setAttribute("aria-pressed", "true");  }
+    if (s === "offline") { label.textContent = "SYSTEM OFFLINE"; btn.setAttribute("aria-pressed", "false"); }
+    if (s === "pending") { label.textContent = "CONNECTING…";    btn.setAttribute("aria-pressed", "false"); }
+  };
+
+  return { el: btn, set };
+}
 
 export async function attachHeartbeat(bar: HTMLElement): Promise<void> {
-  const dot = document.createElement("span");
-  dot.className = "status-bar__dot";
-  bar.prepend(dot);
+  bar.className = "status-bar";
 
-  const textEl = document.createElement("span");
-  bar.appendChild(textEl);
-
-  // Render the spawn outcome on first paint so the user immediately sees
-  // whether Tauri found, started, or failed to start the daemon.
-  try {
-    const status = await ipc.daemonStatus();
-    if (!status.ok) {
-      bar.className = "status-bar status-bar--warn";
-      textEl.textContent = `daemon: ${status.state}${status.err ? ` (${status.err})` : ""}`;
-    }
-  } catch {
-    // Non-fatal — the heartbeat below will own the status from here.
-  }
+  const status = createStatusButton();
+  bar.appendChild(status.el);
 
   let failures = 0;
   let timer: ReturnType<typeof setTimeout> | null = null;
+  let busy = false; // user click in flight — beat() backs off until it clears
 
   const schedule = (ms: number) => {
     if (timer) clearTimeout(timer);
     timer = setTimeout(beat, ms);
   };
 
-  const beat = async () => {
+  // Honour persisted intent immediately. The Tauri shell auto-spawns the
+  // daemon before the window opens (it can't see localStorage), so if the
+  // user previously chose OFF we must take it back down on first paint.
+  if (isForcedOff()) {
+    status.set("offline");
+    try { await ipc.daemonKill(); } catch { /* best-effort */ }
+  }
+
+  status.el.addEventListener("click", async () => {
+    if (busy) return;
+    busy = true;
+    if (timer) { clearTimeout(timer); timer = null; }
+
+    const goingOffline = !isForcedOff();
+    status.set("pending");
+
+    try {
+      if (goingOffline) {
+        const r = await ipc.daemonKill();
+        if (r.ok) {
+          setForcedOff(true);
+          status.set("offline");
+          showToast("Daemon stopped", "success");
+          failures = 0;
+          schedule(HEARTBEAT_OFF_MS);
+        } else {
+          // Kill failed — daemon almost certainly still up; don't lie.
+          status.set("online");
+          showToast(`Stop failed: ${r.err ?? r.state}`, "error");
+          schedule(HEARTBEAT_OK_MS);
+        }
+      } else {
+        // Going online — clear intent first so the heartbeat resumes
+        // auto-respawn behaviour, then ask Tauri to spawn.
+        setForcedOff(false);
+        const r = await ipc.daemonRespawn();
+        applyDaemonStatus(r);
+        if (r.ok) {
+          status.set("online");
+          showToast("Daemon started", "success");
+          failures = 0;
+          schedule(HEARTBEAT_OK_MS);
+        } else {
+          // Spawn refused (binary missing, perms). Re-arm intent so we
+          // don't keep hammering respawn on every heartbeat.
+          setForcedOff(true);
+          status.set("offline");
+          showToast(`Start failed: ${r.err ?? r.state}`, "error");
+          schedule(HEARTBEAT_OFF_MS);
+        }
+      }
+    } catch (e) {
+      showToast(`Toggle error: ${String(e)}`, "error");
+      schedule(HEARTBEAT_MIN_FAIL);
+    } finally {
+      busy = false;
+    }
+  });
+
+  // First-paint spawn-outcome surfacing — same role the old text status had,
+  // but the button colour now carries the state, so we only need the overlay
+  // for hard-fails.
+  if (!isForcedOff()) {
+    try {
+      const s = await ipc.daemonStatus();
+      if (!s.ok) applyDaemonStatus(s);
+    } catch { /* heartbeat will own it */ }
+  }
+
+  async function beat(): Promise<void> {
+    if (busy) { schedule(HEARTBEAT_MIN_FAIL); return; }
+
+    if (isForcedOff()) {
+      // Intent = OFF: probe but don't respawn. If the socket has come back
+      // (systemd, manual CLI start), reflect that in the button.
+      try {
+        const r = await ipc.ping();
+        status.set(r.ok ? "online" : "offline");
+      } catch {
+        status.set("offline");
+      }
+      schedule(HEARTBEAT_OFF_MS);
+      return;
+    }
+
     try {
       const r = await ipc.ping();
       if (r.ok) {
         failures = 0;
-        bar.className = "status-bar status-bar--ok";
-        textEl.textContent = "daemon: connected";
+        status.set("online");
+        hideFatalOverlay();
         schedule(HEARTBEAT_OK_MS);
         return;
       }
-      // Daemon answered but reported an error — surface it.
       failures += 1;
-      bar.className = "status-bar status-bar--err";
-      textEl.textContent = `daemon: ${(r as { err: string }).err}`;
-    } catch (e) {
+      status.set("pending");
+    } catch {
       failures += 1;
-      bar.className = "status-bar status-bar--warn";
-      textEl.textContent = `daemon: unreachable (${String(e)})`;
+      status.set("pending");
     }
 
-    // First three failures: ask Tauri to re-probe / respawn.  After that we
-    // assume the spawn keeps failing and stop hammering the binary lookup.
     if (failures <= 3) {
-      try { await ipc.daemonRespawn(); } catch { /* swallow */ }
+      try {
+        const respawn = await ipc.daemonRespawn();
+        applyDaemonStatus(respawn);
+        if (respawn.ok) {
+          failures = 0;
+          status.set("online");
+          schedule(HEARTBEAT_OK_MS);
+          return;
+        }
+      } catch { /* swallow */ }
     }
+
+    // Auto-respawn exhausted — settle on OFFLINE. Avoids a perpetual
+    // pulsing "connecting" state when the binary is genuinely missing.
+    if (failures > 3) status.set("offline");
 
     const backoff = Math.min(HEARTBEAT_MIN_FAIL << (failures - 1), HEARTBEAT_MAX_FAIL);
     schedule(backoff);
-  };
+  }
 
-  await beat();
+  if (!isForcedOff()) {
+    await beat();
+  } else {
+    schedule(HEARTBEAT_OFF_MS);
+  }
 }

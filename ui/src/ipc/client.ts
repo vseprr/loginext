@@ -75,12 +75,23 @@ export async function applySettings(
 // `state` is the discriminator; payload fields depend on it.
 export interface DaemonStatus {
   ok: boolean;
-  state: "already_running" | "spawned" | "spawn_failed" | "binary_not_found" | "timeout";
+  state:
+    | "already_running"
+    | "spawned"
+    | "spawn_failed"
+    | "binary_not_found"
+    | "timeout"
+    // kill_daemon outcomes:
+    | "killed"
+    | "not_running"
+    | "signal_failed";
   pid?: number;
   err?: string;
 }
 
-async function invokeDaemon(cmd: "daemon_status" | "daemon_respawn"): Promise<DaemonStatus> {
+async function invokeDaemon(
+  cmd: "daemon_status" | "daemon_respawn" | "kill_daemon",
+): Promise<DaemonStatus> {
   const raw = await invoke<string>(cmd);
   try {
     return JSON.parse(raw) as DaemonStatus;
@@ -100,4 +111,5 @@ export const ipc = {
   // Lifecycle: report startup outcome + ask Tauri to re-probe / respawn.
   daemonStatus:  () => invokeDaemon("daemon_status"),
   daemonRespawn: () => invokeDaemon("daemon_respawn"),
+  daemonKill:    () => invokeDaemon("kill_daemon"),
 };

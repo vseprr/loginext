@@ -610,43 +610,167 @@ html, body {
   color: var(--text);
 }
 
-/* ─── Status bar ─────────────────────────────────────────────────── */
+/* ─── Status bar + intent toggle ─────────────────────────────────── */
+/*
+ * The status bar hosts a single interactive button that doubles as the
+ * daemon-state indicator. Two visual identities:
+ *   .status-toggle--online  → green, breathing pulse (alive, healthy)
+ *   .status-toggle--offline → red, static glow      (user-stopped, dormant)
+ *   .status-toggle--pending → neutral, no glow      (transitional)
+ *
+ * Neumorphic foundation: same dual-shadow recipe as the rest of the app
+ * (raised by default, debossed on press). The colour glow is layered on
+ * top of the neumorphic shadow pair so the depth illusion survives.
+ */
 
 .status-bar {
-  font-family: var(--font-mono);
-  font-size: 11px;
-  color: var(--text-faint);
   padding: var(--space-2) var(--space-5);
   display: flex;
   align-items: center;
-  gap: var(--space-2);
+  gap: var(--space-3);
   flex-shrink: 0;
-  height: 36px;
+  height: 44px;
 }
 
-.status-bar__dot {
-  width: 8px;
-  height: 8px;
+.status-toggle {
+  /* Custom palette per state — overridden by the modifier classes below. */
+  --glow-color:  rgba(160, 160, 170, 0.0);
+  --glow-spread: 0px;
+  --dot-color:   var(--text-faint);
+  --dot-glow:    rgba(0, 0, 0, 0);
+  --label-color: var(--text-dim);
+
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 16px;
+  border: none;
+  border-radius: var(--radius-pill);
+  background: var(--surface);
+  color: var(--label-color);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  cursor: pointer;
+
+  /* Outset neumorphic shadow + state-driven coloured glow. The two layers
+     compose: the neu pair sells the embossed look, the glow sells "alive". */
+  box-shadow:
+    var(--neu-out-sm),
+    0 0 var(--glow-spread) var(--glow-color);
+
+  /* Smooth transitions for everything that animates between states.       */
+  /* No `all` — explicit list so layout properties stay non-animated.      */
+  transition:
+    color       var(--transition-fast),
+    box-shadow  var(--transition-med),
+    transform   140ms ease,
+    background  var(--transition-fast);
+
+  will-change: box-shadow, transform;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.status-toggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+
+/* Hover lifts the button slightly and brightens the label. */
+.status-toggle:hover {
+  color: var(--text);
+  transform: translateY(-1px);
+  box-shadow:
+    var(--neu-out),
+    0 0 calc(var(--glow-spread) + 4px) var(--glow-color);
+}
+
+/* Press: scale down + flip to debossed inset shadow so it reads "pushed
+   into the surface". The coloured glow stays so the state cue persists
+   through the click animation. */
+.status-toggle:active {
+  transform: scale(0.98);
+  box-shadow:
+    var(--neu-in-sm),
+    0 0 var(--glow-spread) var(--glow-color);
+}
+
+.status-toggle__dot {
+  width: 9px;
+  height: 9px;
   border-radius: 50%;
-  background: var(--text-faint);
-  box-shadow: var(--neu-in-sm);
+  background: var(--dot-color);
+  box-shadow: 0 0 8px var(--dot-glow);
   flex-shrink: 0;
+  transition: background var(--transition-fast),
+              box-shadow var(--transition-med);
 }
 
-.status-bar--ok   { color: #8ad18a; }
-.status-bar--ok .status-bar__dot {
-  background: #8ad18a;
-  box-shadow: 0 0 8px rgba(138, 209, 138, 0.5);
+.status-toggle__label {
+  line-height: 1;
 }
-.status-bar--warn { color: #e2b06a; }
-.status-bar--warn .status-bar__dot {
-  background: #e2b06a;
-  box-shadow: 0 0 8px rgba(226, 176, 106, 0.4);
+
+/* ─── ONLINE — green, breathing pulse ─────────────────────────────── */
+
+.status-toggle--online {
+  --glow-color:  rgba(138, 209, 138, 0.55);
+  --glow-spread: 14px;
+  --dot-color:   #a6e6a6;
+  --dot-glow:    rgba(138, 209, 138, 0.85);
+  --label-color: #b6e8b6;
+
+  /* The breathing animation only modulates the glow's spread + opacity —
+     never layout. Cubic timing function keeps the rise/fall organic. */
+  animation: status-online-pulse 2.4s ease-in-out infinite;
 }
-.status-bar--err  { color: #e47878; }
-.status-bar--err .status-bar__dot {
-  background: #e47878;
-  box-shadow: 0 0 8px rgba(228, 120, 120, 0.4);
+
+.status-toggle--online:hover {
+  /* Pause the pulse on hover so the user sees a stable target while
+     deciding whether to click. */
+  animation-play-state: paused;
+}
+
+@keyframes status-online-pulse {
+  0% {
+    box-shadow:
+      var(--neu-out-sm),
+      0 0 10px rgba(138, 209, 138, 0.35);
+  }
+  50% {
+    box-shadow:
+      var(--neu-out-sm),
+      0 0 22px rgba(138, 209, 138, 0.75),
+      0 0 6px rgba(138, 209, 138, 0.45) inset;
+  }
+  100% {
+    box-shadow:
+      var(--neu-out-sm),
+      0 0 10px rgba(138, 209, 138, 0.35);
+  }
+}
+
+/* ─── OFFLINE — red, static glow ──────────────────────────────────── */
+
+.status-toggle--offline {
+  --glow-color:  rgba(228, 120, 120, 0.40);
+  --glow-spread: 12px;
+  --dot-color:   #e47878;
+  --dot-glow:    rgba(228, 120, 120, 0.6);
+  --label-color: #e9a3a3;
+  /* No animation — dormant systems should look dormant. */
+}
+
+/* ─── PENDING — neutral transitional state ────────────────────────── */
+
+.status-toggle--pending {
+  --glow-color:  rgba(160, 165, 200, 0.18);
+  --glow-spread: 8px;
+  --dot-color:   var(--text-dim);
+  --dot-glow:    rgba(160, 165, 200, 0.3);
+  --label-color: var(--text-dim);
 }
 
 /* ─── Feedback toast ─────────────────────────────────────────────── */
@@ -676,6 +800,61 @@ html, body {
 
 .toast--success { border-left: 3px solid #8ad18a; }
 .toast--error   { border-left: 3px solid #e47878; }
+
+/* ─── Daemon fatal-state overlay ─────────────────────────────────── */
+/*
+ * Shown for hard-fail daemon states (binary_not_found / spawn_failed /
+ * timeout). Non-blocking — the rest of the UI stays interactive so the
+ * user can still inspect controls / read status while reading the banner.
+ */
+
+.daemon-overlay {
+  position: fixed;
+  inset: 0;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(2px);
+  z-index: 1000;
+  padding: var(--space-5);
+}
+
+.daemon-overlay--visible {
+  display: flex;
+}
+
+.daemon-overlay__card {
+  max-width: 460px;
+  background: var(--surface-deep);
+  border: 1px solid var(--surface-hi);
+  border-left: 3px solid #e47878;
+  border-radius: var(--radius-lg, 10px);
+  padding: var(--space-5) var(--space-5);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+  color: var(--text-primary);
+}
+
+.daemon-overlay__title {
+  font-weight: 600;
+  font-size: 1.05rem;
+  margin-bottom: var(--space-2);
+  color: #e47878;
+}
+
+.daemon-overlay__detail {
+  font-size: 0.92rem;
+  line-height: 1.45;
+  color: var(--text-secondary);
+  margin-bottom: var(--space-3);
+  word-break: break-word;
+}
+
+.daemon-overlay__hint {
+  font-size: 0.82rem;
+  color: var(--text-faint);
+  font-family: var(--font-mono, monospace);
+}
 
 /* ─── Empty state ────────────────────────────────────────────────── */
 
