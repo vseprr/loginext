@@ -11,8 +11,8 @@ int8_t sign(int32_t v) noexcept {
     return static_cast<int8_t>((v > 0) - (v < 0));
 }
 
-ActionResult action_for_direction(int8_t dir) noexcept {
-    return dir > 0 ? ActionResult::TabNext : ActionResult::TabPrev;
+Direction direction_for(int8_t dir) noexcept {
+    return dir > 0 ? Direction::Right : Direction::Left;
 }
 
 // Continuous velocity curve: lerp between fast_threshold and slow_threshold
@@ -27,10 +27,10 @@ int32_t dynamic_threshold(int64_t dt_ns, const config::Profile& p) noexcept {
 
 } // namespace
 
-ActionResult process_hwheel(ScrollState& state, int32_t value,
-                            int64_t timestamp_ns,
-                            const config::Profile& p) noexcept {
-    if (value == 0) return ActionResult::None;
+Direction process_hwheel(ScrollState& state, int32_t value,
+                         int64_t timestamp_ns,
+                         const config::Profile& p) noexcept {
+    if (value == 0) return Direction::None;
 
     const int64_t dt = (state.last_event_ns > 0)
                        ? (timestamp_ns - state.last_event_ns)
@@ -58,7 +58,7 @@ ActionResult process_hwheel(ScrollState& state, int32_t value,
         } else {
             // Jitter — absorb silently, do not alter direction or accumulator
             state.last_event_ns = timestamp_ns;
-            return ActionResult::None;
+            return Direction::None;
         }
     } else {
         state.reverse_count = 0;
@@ -80,7 +80,7 @@ ActionResult process_hwheel(ScrollState& state, int32_t value,
         if (same_dir && in_window) {
             state.accumulator  = 0;
             state.last_emit_ns = timestamp_ns;
-            return action_for_direction(event_dir);
+            return direction_for(event_dir);
         }
         // Stale or reverse pending → fall through; treat this event as the
         // new gesture-start candidate below.
@@ -94,12 +94,12 @@ ActionResult process_hwheel(ScrollState& state, int32_t value,
     if (gesture_start) {
         state.pending_dir = event_dir;
         state.pending_ts  = timestamp_ns;
-        return ActionResult::None;
+        return Direction::None;
     }
 
     // Cooldown: same-gesture emissions must be spaced by emit_cooldown_ns
     if (timestamp_ns - state.last_emit_ns < p.emit_cooldown_ns) {
-        return ActionResult::None;
+        return Direction::None;
     }
 
     // Velocity-curve threshold for sustained swipes
@@ -107,10 +107,10 @@ ActionResult process_hwheel(ScrollState& state, int32_t value,
     if (state.accumulator >= threshold) {
         state.accumulator  = 0;
         state.last_emit_ns = timestamp_ns;
-        return action_for_direction(event_dir);
+        return direction_for(event_dir);
     }
 
-    return ActionResult::None;
+    return Direction::None;
 }
 
 void tick_leak(ScrollState& state, int64_t now_ns, const config::Profile& p) noexcept {
@@ -129,4 +129,3 @@ void tick_leak(ScrollState& state, int64_t now_ns, const config::Profile& p) noe
 }
 
 } // namespace loginext::heuristics
-

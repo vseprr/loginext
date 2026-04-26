@@ -2,7 +2,8 @@ import { card } from "../components/card";
 import { segmented } from "../components/segmented";
 import { toggle } from "../components/toggle";
 import { ipc, type SettingsResponse, type DevicesResponse,
-         type ControlsResponse, type PresetsResponse } from "../ipc/client";
+         type ControlsResponse, type PresetsResponse,
+         type Preset } from "../ipc/client";
 
 type Mode = "low" | "medium" | "high";
 
@@ -176,10 +177,26 @@ async function fetchInitialState() {
       // Sync the UI controls (DOM is the source of truth for both widgets).
       syncSegmented(currentMode);
       syncToggle(currentInvert);
+      // Resolve the active preset's display name from `list_presets` so the
+      // right-column header reflects whatever the daemon has bound. The
+      // current shipping value is "tab_nav" but the header is no longer
+      // hardcoded to it.
+      void syncPresetHeader(s.active_preset);
     }
   } catch {
     // Daemon may not be running — controls keep defaults
   }
+}
+
+async function syncPresetHeader(activeId: string): Promise<void> {
+  if (!presetHeaderNameEl) return;
+  try {
+    const res = await ipc.listPresets();
+    if (!res.ok) return;
+    const data = res as PresetsResponse;
+    const match = data.presets.find((p) => p.id === activeId);
+    if (match) presetHeaderNameEl.textContent = match.name;
+  } catch { /* keep the placeholder text — heartbeat will handle offline */ }
 }
 
 // ── Device column (left) ──────────────────────────────────────────
@@ -293,50 +310,58 @@ function controlColumn(): HTMLElement {
   presetCard.appendChild(presetList);
   col.appendChild(presetCard);
 
-  void (async () => {
-    try {
-      const res = await ipc.listPresets();
-      presetList.innerHTML = "";
-      if (res.ok) {
-        const data = res as PresetsResponse;
-        for (const p of data.presets) {
-          const item = document.createElement("div");
-          item.className = "list-item";
-          item.setAttribute("aria-selected", "true");
-          item.id = `preset-${p.id}`;
-
-          const icon = document.createElement("div");
-          icon.className = "icon-circle icon-circle--sm icon-circle--active";
-          icon.innerHTML = tabSvg;
-
-          const label = document.createElement("span");
-          label.textContent = p.name;
-
-          item.appendChild(icon);
-          item.appendChild(label);
-          presetList.appendChild(item);
-        }
-      }
-    } catch {
-      presetList.innerHTML = "";
-      const item = document.createElement("div");
-      item.className = "list-item";
-      item.setAttribute("aria-selected", "true");
-
-      const icon = document.createElement("div");
-      icon.className = "icon-circle icon-circle--sm icon-circle--active";
-      icon.innerHTML = tabSvg;
-
-      const label = document.createElement("span");
-      label.textContent = "Navigate between tabs";
-
-      item.appendChild(icon);
-      item.appendChild(label);
-      presetList.appendChild(item);
-    }
-  })();
+  // Preset list is now driven entirely by the daemon's `list_presets`. The
+  // active row is whichever id the daemon reports under `active`. Phase 2.4
+  // renders this read-only; the click-to-switch wiring lands when a second
+  // preset is shipped — until then the segmented Low/Medium/High control
+  // remains the only interactive element on the panel and is unaffected.
+  void renderPresetList(presetList);
 
   return col;
+}
+
+async function renderPresetList(presetList: HTMLElement): Promise<void> {
+  let presets: Preset[] = [];
+  let active: string | null = null;
+  try {
+    const res = await ipc.listPresets();
+    if (res.ok) {
+      const data = res as PresetsResponse;
+      presets = data.presets;
+      active = data.active ?? null;
+    }
+  } catch {
+    // Daemon down — fall back to a single placeholder so the column doesn't
+    // collapse. The heartbeat owns the user-visible "offline" signal.
+    presets = [{ id: "tab_nav", name: "Navigate between tabs" }];
+    active = "tab_nav";
+  }
+
+  presetList.innerHTML = "";
+  for (const p of presets) {
+    const isActive = active != null ? p.id === active : presets.length === 1;
+    presetList.appendChild(presetListItem(p, isActive));
+  }
+}
+
+function presetListItem(p: Preset, isActive: boolean): HTMLElement {
+  const item = document.createElement("div");
+  item.className = "list-item";
+  item.setAttribute("aria-selected", String(isActive));
+  item.id = `preset-${p.id}`;
+  item.dataset.presetId = p.id;
+
+  const icon = document.createElement("div");
+  icon.className =
+    "icon-circle icon-circle--sm" + (isActive ? " icon-circle--active" : "");
+  icon.innerHTML = tabSvg;
+
+  const label = document.createElement("span");
+  label.textContent = p.name;
+
+  item.appendChild(icon);
+  item.appendChild(label);
+  return item;
 }
 
 function controlItem(name: string, kind: string, selected: boolean): HTMLElement {
@@ -370,6 +395,7 @@ function controlItem(name: string, kind: string, selected: boolean): HTMLElement
 
 let segmentedEl: HTMLElement | null = null;
 let toggleEl: HTMLElement | null = null;
+let presetHeaderNameEl: HTMLElement | null = null;
 
 function syncSegmented(mode: Mode) {
   if (!segmentedEl) return;
@@ -401,7 +427,11 @@ function presetColumn(): HTMLElement {
 
   const headerName = document.createElement("div");
   headerName.className = "preset-header__name";
+  // Placeholder until `fetchInitialState()` resolves the active preset's
+  // display name from the daemon. Hardcoding the string here would defeat
+  // the modular preset selection menu groundwork.
   headerName.textContent = "Navigate between tabs";
+  presetHeaderNameEl = headerName;
 
   header.appendChild(headerIcon);
   header.appendChild(headerName);

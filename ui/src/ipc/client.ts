@@ -22,6 +22,10 @@ export type IpcResult = IpcOk | IpcErr;
 export interface SettingsResponse extends IpcOk {
   mode: "low" | "medium" | "high";
   invert_hwheel: boolean;
+  // Daemon-side identifier for the currently-bound preset on the thumb wheel.
+  // Stable across daemon restarts; matches one of the ids returned by
+  // `list_presets`. Phase 2.4 ships with a single value, "tab_nav".
+  active_preset: string;
 }
 
 export interface Device {
@@ -47,6 +51,9 @@ export interface Preset {
 }
 export interface PresetsResponse extends IpcOk {
   presets: Preset[];
+  // Id of the currently-active preset — same field surfaced by get_settings.
+  // Optional for backward compatibility with older daemon builds.
+  active?: string;
 }
 
 export async function request(cmd: string, extra: Record<string, unknown> = {}): Promise<IpcResult> {

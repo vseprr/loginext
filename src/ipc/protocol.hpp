@@ -16,6 +16,12 @@
 // The schema is intentionally flat — it is consumed by the same stack-based
 // parser used for the config file (see src/config/loader.cpp). No escapes,
 // no nesting beyond what each handler explicitly emits.
+//
+// Preset surface (Phase 2.4):
+//   list_presets  → {"ok":true,"presets":[{"id":"<id>","name":"<name>"}, ...],
+//                    "active":"<id>"}
+//   get_settings  → {"ok":true,"mode":"...","invert_hwheel":...,"active_preset":"<id>"}
+// The active-preset id is the same string returned by presets::preset_id_str().
 
 namespace loginext::ipc {
 

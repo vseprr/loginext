@@ -79,6 +79,16 @@ private:
             out.invert_hwheel = b;
             return true;
         }
+        if (key == "active_preset") {
+            std::string_view v;
+            if (!parse_string_view(v)) return false;
+            presets::PresetId id;
+            if (!presets::preset_id_from_str(v.data(), v.size(), id)) {
+                return fail("unknown preset id");
+            }
+            out.active_preset = id;
+            return true;
+        }
         // Unknown key — consume the value silently for forward compat.
         return skip_value();
     }

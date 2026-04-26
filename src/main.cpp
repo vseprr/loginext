@@ -8,6 +8,7 @@
 #include "heuristics/scroll_state.hpp"
 #include "ipc/dispatch.hpp"
 #include "ipc/server.hpp"
+#include "presets/preset.hpp"
 #include "util/log.hpp"
 
 #include <csignal>
@@ -56,14 +57,20 @@ void on_event(const input_event& ev, void* ctx) {
         loginext::heuristics::tick_leak(app->scroll, ts, app->settings.profile);
 
         int32_t value = app->settings.invert_hwheel ? -ev.value : ev.value;
-        auto result = loginext::heuristics::process_hwheel(app->scroll, value, ts,
-                                                           app->settings.profile);
-        if (result != loginext::heuristics::ActionResult::None) {
+        auto dir = loginext::heuristics::process_hwheel(app->scroll, value, ts,
+                                                        app->settings.profile);
+        if (dir != loginext::heuristics::Direction::None) {
+            // Resolve the logical tick under the currently-active preset.
+            // The heuristic engine never sees this dispatch; the preset table
+            // is constexpr and the lookup is a single switch.
+            const auto combo = loginext::presets::resolve(
+                app->settings.active_preset, dir);
             // Per-emit traces are file-only — would otherwise spam the
             // interactive terminal during normal scrolling.
-            LX_TRACE("emit %s",
-                     result == loginext::heuristics::ActionResult::TabNext ? "TabNext" : "TabPrev");
-            loginext::core::enqueue_action(app->pacer, result, ts);
+            LX_TRACE("emit dir=%s preset=%s",
+                     dir == loginext::heuristics::Direction::Right ? "right" : "left",
+                     loginext::presets::preset_id_str(app->settings.active_preset));
+            loginext::core::enqueue_combo(app->pacer, combo, ts);
         }
 
         loginext::core::check_damping(app->pacer, ts, app->emitter);

@@ -1,6 +1,7 @@
 #include "ipc/dispatch.hpp"
 
 #include "config/profile.hpp"
+#include "presets/preset.hpp"
 
 #include <cstdio>
 #include <cstring>
@@ -54,9 +55,11 @@ int handle_ping(char* resp, size_t cap) noexcept {
 int handle_get_settings(char* resp, size_t cap,
                         const loginext::config::Settings& s) noexcept {
     int n = std::snprintf(resp, cap,
-        "{\"ok\":true,\"mode\":\"%s\",\"invert_hwheel\":%s}",
+        "{\"ok\":true,\"mode\":\"%s\",\"invert_hwheel\":%s,"
+        "\"active_preset\":\"%s\"}",
         loginext::config::mode_name(s.mode),
-        s.invert_hwheel ? "true" : "false");
+        s.invert_hwheel ? "true" : "false",
+        loginext::presets::preset_id_str(s.active_preset));
     return (n > 0 && static_cast<size_t>(n) < cap) ? n : -1;
 }
 
@@ -78,11 +81,26 @@ int handle_list_controls(char* resp, size_t cap) noexcept {
     return (n > 0 && static_cast<size_t>(n) < cap) ? n : -1;
 }
 
-int handle_list_presets(char* resp, size_t cap) noexcept {
+int handle_list_presets(char* resp, size_t cap,
+                        const loginext::config::Settings& s) noexcept {
+    // The body is built from the preset table so adding a new PresetId
+    // automatically widens this listing — no string surgery here.
+    char body[512];
+    int  bn = 0;
+    for (uint8_t i = 0; i < loginext::presets::preset_count; ++i) {
+        auto id = static_cast<loginext::presets::PresetId>(i);
+        int w = std::snprintf(body + bn, sizeof(body) - static_cast<size_t>(bn),
+                              "%s{\"id\":\"%s\",\"name\":\"%s\"}",
+                              i == 0 ? "" : ",",
+                              loginext::presets::preset_id_str(id),
+                              loginext::presets::preset_name(id));
+        if (w <= 0 || static_cast<size_t>(bn + w) >= sizeof(body)) return -1;
+        bn += w;
+    }
     int n = std::snprintf(resp, cap,
-        "{\"ok\":true,\"presets\":["
-          "{\"id\":\"tab_nav\",\"name\":\"Navigate between tabs\"}"
-        "]}");
+        "{\"ok\":true,\"presets\":[%.*s],\"active\":\"%s\"}",
+        bn, body,
+        loginext::presets::preset_id_str(s.active_preset));
     return (n > 0 && static_cast<size_t>(n) < cap) ? n : -1;
 }
 
@@ -120,7 +138,7 @@ int dispatch_with_fd(const char* line, size_t len,
     if (cmd == "get_settings")  return handle_get_settings(resp, resp_cap, *dc->settings);
     if (cmd == "list_devices")  return handle_list_devices(resp, resp_cap);
     if (cmd == "list_controls") return handle_list_controls(resp, resp_cap);
-    if (cmd == "list_presets")  return handle_list_presets(resp, resp_cap);
+    if (cmd == "list_presets")  return handle_list_presets(resp, resp_cap, *dc->settings);
     if (cmd == "reload")        return handle_reload(dc, client_fd);
 
     return write_err(resp, resp_cap, "unknown_command");
