@@ -20,6 +20,20 @@ Detailed roadmap: [progress.md](./progress.md). Shipped fixes: [CHANGELOG.md](./
 
 ---
 
+## Quick start (Arch / CachyOS)
+
+```bash
+git clone https://github.com/vseprr/loginext.git
+cd loginext
+./deploy/install.sh
+```
+
+The script installs all `pacman` dependencies, builds the daemon and the Tauri UI in release mode, drops both binaries into `~/.local/bin`, registers an icon and `.desktop` entry, and stages the systemd user unit. After it finishes, **LogiNext appears in your application menu** — search for it and launch like any other GUI app. No manual build steps; the long-form sections below are for contributors and packagers.
+
+Pass `--enable-service` to also enable `loginext.service` so the daemon auto-starts at login (otherwise the UI spawns it on demand, which is the recommended workflow).
+
+---
+
 ## Highlights (Phase 1)
 
 - **Auto-detected** MX Master 3S over Bolt (`046d:b034`) or USB (`046d:c548`).
