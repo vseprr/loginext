@@ -165,8 +165,11 @@ loginext-*.sock
 state/
 
 # Debug & profiling artefaktları
-core
-core.*
+# Anchor crash-dump patterns to the repo root so they cannot match the
+# tracked source directory `src/core/`. Kernel core dumps land in CWD
+# or systemd-coredump's spool — never inside the source tree.
+/core
+/core.*
 vgcore.*
 perf.data
 perf.data.old
@@ -197,6 +200,7 @@ out/
 # Tauri bundle outputs
 ui/src-tauri/target/release/bundle/
 
-# Md Files
-agents.md
-progress.md
+# (Removed) — agents.md and progress.md are project documentation that
+# *must* be tracked. They were previously ignored by mistake; the rule
+# excluded them from clean GitHub clones and broke contributors who
+# relied on agents.md as the rulebook.
