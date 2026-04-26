@@ -9,6 +9,11 @@ build-*/
 *.so
 *.dylib
 *.out
+*.pdb
+*.ilk
+*.exp
+*.lib
+*.exe
 CMakeCache.txt
 CMakeFiles/
 CMakeScripts/
@@ -16,6 +21,10 @@ cmake_install.cmake
 CTestTestfile.cmake
 compile_commands.json
 install_manifest.txt
+# Cargo / Rust (top-level — covers any future workspace member outside ui/)
+target/
+**/target/
+*.rs.bk
 
 # IDE / editor
 .vscode/
@@ -27,11 +36,20 @@ install_manifest.txt
 .DS_Store
 Thumbs.db
 *.code-workspace
+.history/
+*.iml
+.project
+.settings/
+.classpath
+.vs/
+*.sublime-project
+*.sublime-workspace
 
 # Clangd / LSP
-.cache/
 .clangd/
 .clang-format.bak
+.ccls-cache/
+.cquery_cached_index/
 
 # Agent / tool state
 .claude/
@@ -39,6 +57,8 @@ Thumbs.db
 .aider*
 .cursor/
 .windsurf/
+.copilot/
+.continue/
 
 # Phase 2 UI (Tauri / Node)
 ui/node_modules/
@@ -50,6 +70,31 @@ ui/src-tauri/target/
 ui/src-tauri/Cargo.lock
 ui/.env
 ui/.env.*
+# Tauri / TS auto-generated artefacts (regenerated on every build)
+ui/src-tauri/gen/
+ui/src-tauri/WixTools/
+ui/.vite/
+ui/.turbo/
+**/node_modules/
+**/.vite/
+**/.parcel-cache/
+*.tsbuildinfo
+.eslintcache
+.stylelintcache
+# npm / yarn / pnpm logs and stores
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+.pnpm-debug.log*
+.npm/
+.yarn/
+.pnpm-store/
+# Test / coverage output
+coverage/
+*.lcov
+.nyc_output/
+junit.xml
 
 # Local / user-specific
 *.local
@@ -63,21 +108,61 @@ ui/.env.*
 *.crt
 *.p12
 *.pfx
+*.jks
+*.keystore
+*.gpg
+*.asc
 id_rsa
 id_rsa.*
 id_ed25519
 id_ed25519.*
+id_ecdsa
+id_ecdsa.*
+.ssh/
+known_hosts
 .env
 .env.*
+.envrc
 secrets/
 *.secret
 *.token
 *_token
 *_secret
+auth.json
+credentials.json
+credentials.yaml
+credentials.yml
+service-account*.json
+.netrc
+_netrc
+.aws/
+.azure/
+.gcloud/
+.config/gcloud/
+cookies.txt
+# Local databases / dumps that may contain personal data
+*.sqlite
+*.sqlite3
+*.db
+*.dump
+*.kdbx
+# Private notes / drafts that should never be shared
+personal/
+private/
+notes/
+*.private.*
 
 # Kullanıcı runtime config'i (örnek değil, gerçek ayar)
 config/config.json
 config/local.json
+
+# Daemon runtime artefacts
+*.sock
+*.pid
+loginext.sock
+loginext-*.sock
+# State directory if anyone symlinks it inside the repo for inspection
+state/
 
 # Debug & profiling artefaktları
 core
@@ -87,7 +172,31 @@ perf.data
 perf.data.old
 *.log
 *.trace
-# Md Files
-agents.md 
-progress.md
+massif.out.*
+callgrind.out.*
+cachegrind.out.*
+flamegraph*.svg
+*.gcov
+*.gcda
+*.gcno
 
+# Packaging / release artefacts
+*.tar
+*.tar.gz
+*.tar.xz
+*.tar.bz2
+*.tgz
+*.zip
+*.7z
+*.deb
+*.rpm
+*.AppImage
+*.pkg.tar.zst
+release/
+out/
+# Tauri bundle outputs
+ui/src-tauri/target/release/bundle/
+
+# Md Files
+agents.md
+progress.md
