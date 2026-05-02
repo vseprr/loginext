@@ -9,6 +9,9 @@
 #include "ipc/dispatch.hpp"
 #include "ipc/server.hpp"
 #include "presets/preset.hpp"
+#include "scope/listener.hpp"
+#include "scope/rules.hpp"
+#include "scope/rules_loader.hpp"
 #include "util/log.hpp"
 
 #include <csignal>
@@ -40,11 +43,14 @@ int64_t timeval_to_ns(const timeval& tv) noexcept {
 struct AppContext {
     loginext::config::Settings        settings;
     std::string                       config_path;
+    std::string                       rules_path;
     loginext::heuristics::ScrollState scroll;
     loginext::core::PacingQueue       pacer;
     loginext::core::EmitterHandle     emitter;
     loginext::ipc::IpcServer          ipc;
     loginext::ipc::DispatchCtx        ipc_ctx;
+    loginext::scope::RuleTable        rules;       // hot-path O(1) per-app lookup
+    loginext::scope::Listener         scope;       // background detector → atomic hash
     int                               epoll_fd = -1;  // mirror of EventLoop's for ipc dispatch
 };
 
@@ -60,11 +66,22 @@ void on_event(const input_event& ev, void* ctx) {
         auto dir = loginext::heuristics::process_hwheel(app->scroll, value, ts,
                                                         app->settings.profile);
         if (dir != loginext::heuristics::Direction::None) {
-            // Resolve the logical tick under the currently-active preset.
-            // The heuristic engine never sees this dispatch; the preset table
-            // is constexpr and the lookup is a single switch.
-            const auto combo = loginext::presets::resolve(
-                app->settings.active_preset, dir);
+            // Per-app scope: the listener thread publishes the focused app's
+            // FNV-1a hash into an atomic. Hot path reads it as one relaxed
+            // load + one O(1) hash-table probe; on miss (or on hash==0,
+            // i.e. "no specific app") we keep the global preset. Most
+            // specific match wins, exactly one branch off the cold path.
+            uint32_t app_hash = app->scope.active_app_hash.load(
+                std::memory_order_relaxed);
+            loginext::presets::PresetId effective = app->settings.active_preset;
+            loginext::presets::PresetId override_id;
+            if (loginext::scope::lookup(app->rules, app_hash, override_id)) {
+                effective = override_id;
+            }
+            // Resolve the logical tick under the effective preset. The
+            // heuristic engine never sees this dispatch; the preset table is
+            // constexpr and the lookup is a single switch.
+            const auto combo = loginext::presets::resolve(effective, dir);
             // Per-emit traces are file-only — would otherwise spam the
             // interactive terminal during normal scrolling.
             LX_TRACE("emit dir=%s preset=%s",
@@ -99,6 +116,11 @@ void on_reload(void* ctx) {
     } else {
         LX_WARN("SIGHUP received but no config changes applied");
     }
+    // Per-app scope rules live in a sidecar file (so the JSON parser stays
+    // small per agents.md rule 2). Reload them on the same SIGHUP so the
+    // table stays in sync with the user's edits.
+    loginext::scope::load_rules(app->rules_path, app->rules);
+
     // Reset gesture state so the next event starts a clean leading-edge emit
     app->scroll = {};
 
@@ -145,8 +167,10 @@ int main(int argc, char* argv[]) {
     app.config_path = cli.config_path.empty()
                     ? loginext::config::default_config_path()
                     : cli.config_path;
+    app.rules_path  = loginext::scope::default_rules_path();
 
     loginext::config::load_settings(app.config_path, app.settings);
+    loginext::scope::load_rules(app.rules_path, app.rules);
 
     if (cli.cli_mode_set)   app.settings.mode          = cli.mode;
     if (cli.cli_invert_set) app.settings.invert_hwheel = cli.invert_hwheel;
@@ -241,6 +265,14 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    // Per-app scope listener — own thread, never touches the epoll loop.
+    // A failure to start is non-fatal: the daemon falls back to global-only
+    // resolution and logs a warning. start() does not block on compositor
+    // I/O; the actual probe runs inside the spawned thread.
+    if (loginext::scope::start(app.scope) != 0) {
+        LX_WARN("scope: listener disabled — per-app rules inactive");
+    }
+
     LX_INFO("running — SIGHUP reloads config, SIGTERM/Ctrl+C to stop");
 
     // --- Hot path (zero heap allocations from here) ---
@@ -258,6 +290,7 @@ int main(int argc, char* argv[]) {
 
     // --- Teardown (reverse order of init) ---
     LX_INFO("shutting down");
+    loginext::scope::stop(app.scope);
     loginext::ipc::shutdown_server(app.ipc);
     loginext::core::shutdown_loop(loop);
     loginext::core::destroy_pacer(app.pacer);

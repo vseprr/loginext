@@ -13,8 +13,8 @@ The UI launches the daemon on demand and detaches from it. Once the daemon is ru
 | Phase | What it covers | State |
 |---|---|---|
 | 1 | Thumb wheel → `Ctrl+Tab` / `Ctrl+Shift+Tab`, three sensitivity profiles, gesture heuristics | ✅ shipped |
-| 2 | Neumorphism dark UI, daemon spawn/respawn lifecycle, per-control preset assignment | 🚧 in progress |
-| 3 | Other MX Master 3S controls (Back/Forward, gesture button, vertical wheel) + new presets (volume, zoom, custom keystroke) | planned |
+| 2 | Neumorphism dark UI, daemon spawn/respawn lifecycle, per-control preset assignment, Zoom preset, per-application scope (X11 + Hyprland), native Arch PKGBUILD | 🚧 in progress |
+| 3 | Other MX Master 3S controls (Back/Forward, gesture button, vertical wheel) + new presets (volume, custom keystroke) | planned |
 
 Detailed roadmap: [progress.md](./progress.md). Shipped fixes: [CHANGELOG.md](./CHANGELOG.md).
 
@@ -22,15 +22,29 @@ Detailed roadmap: [progress.md](./progress.md). Shipped fixes: [CHANGELOG.md](./
 
 ## Quick start (Arch / CachyOS)
 
+Two equivalent paths, pick one:
+
+**A — pacman-managed `-git` package (recommended on Arch).**
+
+```bash
+git clone https://github.com/vseprr/loginext.git
+cd loginext/deploy
+makepkg -si
+```
+
+The PKGBUILD is a `-git` recipe (`pkgver()` resolves at build time from `git describe`), so future updates are just `git pull` followed by `makepkg -si` — pacman cleanly upgrades the installed copy. To remove: `sudo pacman -R loginext-git`.
+
+**B — script install (any distro with the dependencies).**
+
 ```bash
 git clone https://github.com/vseprr/loginext.git
 cd loginext
 ./deploy/install.sh
 ```
 
-The script installs all `pacman` dependencies, builds the daemon and the Tauri UI in release mode, drops both binaries into `~/.local/bin`, registers an icon and `.desktop` entry, and stages the systemd user unit. After it finishes, **LogiNext appears in your application menu** — search for it and launch like any other GUI app. No manual build steps; the long-form sections below are for contributors and packagers.
+Installs `pacman` deps, builds the daemon and the Tauri UI in release mode, drops both binaries into `~/.local/bin`, registers an icon and `.desktop` entry, stages the systemd user unit.
 
-Pass `--enable-service` to also enable `loginext.service` so the daemon auto-starts at login (otherwise the UI spawns it on demand, which is the recommended workflow).
+Either way, **LogiNext appears in your application menu** — search for it and launch like any other GUI app. Pass `--enable-service` to the script (or `systemctl --user enable --now loginext.service` after the package install) if you want the daemon to auto-start at login (otherwise the UI spawns it on demand, which is the recommended workflow).
 
 ---
 
@@ -51,6 +65,7 @@ Pass `--enable-service` to also enable `loginext.service` so the daemon auto-sta
 
 - Linux with `uinput` enabled (`CONFIG_INPUT_UINPUT=y` or built as a module).
 - `libevdev` ≥ 1.13.
+- `libxcb` + `xcb-util-wm` (Phase 2.5 active-window listener for X11 sessions; absent on a pure-Wayland host the X11 backend just stays idle, but the build still requires the headers).
 - CMake ≥ 3.25, Ninja, GCC 14+ or Clang 18+.
 - Read access to `/dev/input/eventX` and read/write access to `/dev/uinput`. Either:
   - membership in the `input` group, **or**
@@ -62,7 +77,7 @@ For the UI: Node 20+ and a recent Rust toolchain (Tauri 2.x).
 Arch / CachyOS:
 
 ```bash
-sudo pacman -S --needed cmake ninja libevdev gcc pkgconf nodejs npm rustup
+sudo pacman -S --needed cmake ninja libevdev libxcb xcb-util-wm gcc pkgconf nodejs npm rustup
 rustup default stable
 ```
 
@@ -121,6 +136,7 @@ sudo ./build/loginext --mode=medium
 | `--config=PATH` | Use a non-default JSON config |
 | `--quiet` | Suppress stderr (file log keeps recording) |
 | `--verbose` | Lower the file-log threshold to Trace (per-event detail) |
+| `--debug-events` | Dump raw libevdev events to stderr (hardware discovery; use with the UI in SYSTEM OFFLINE) |
 | `--help` | Show usage and exit |
 
 `SIGHUP` reloads the config file without restarting.
@@ -141,6 +157,23 @@ Default path: `$XDG_CONFIG_HOME/loginext/config.json` (falls back to `~/.config/
 A starter file lives at [config/example.json](./config/example.json).
 
 The UI writes this file on every change and asks the daemon to reload — you do not have to edit JSON by hand.
+
+### Per-application rules (Phase 2.5)
+
+A sidecar text file at `$XDG_CONFIG_HOME/loginext/app_rules.txt` overrides `active_preset` per focused window:
+
+```text
+# one rule per line: <app_id>=<preset_id>
+firefox=tab_nav
+code=zoom
+gimp=zoom
+```
+
+App ids are case-insensitive — they're the X11 `WM_CLASS` (instance name preferred) or the Hyprland window class. The daemon hashes them at load time so the hot path only ever runs an integer compare against an atomic published by the active-window listener thread. If no rule matches, the global `active_preset` from `config.json` applies.
+
+A reference file with common bindings lives at [config/app_rules.example.txt](./config/app_rules.example.txt). Reload after editing with `pkill -HUP loginext` (or any UI action that triggers a reload).
+
+Compositor coverage today: X11 (via `_NET_ACTIVE_WINDOW`) and Hyprland (`HYPRLAND_INSTANCE_SIGNATURE` → IPC event stream). On other Wayland compositors the listener idles and rules don't fire — every event resolves against the global preset, which is graceful but not what you want long-term.
 
 ---
 
@@ -299,6 +332,8 @@ Internal rules: [agents.md](./agents.md). Performance discipline: [OPTIMIZATIONS
 src/
 ├── core/         # event loop, device grab, emitter, pacer
 ├── heuristics/   # scroll state + velocity engine
+├── presets/      # constexpr (PresetId, Direction) → KeyCombo table
+├── scope/        # per-app O(1) rule table + async active-window listener
 ├── config/       # constants, profiles, CLI args, JSON loader
 ├── ipc/          # UDS server + dispatch
 ├── util/         # logger
@@ -307,9 +342,13 @@ ui/
 ├── src/          # vanilla TS — components, views, ipc client
 └── src-tauri/    # Rust shell — daemon spawn, IPC bridge
 deploy/
-├── systemd/      # user-unit template
-└── scripts/      # loginext-logs (tail helper)
-config/example.json
+├── PKGBUILD     # native Arch -git package recipe
+├── install.sh   # script-based install (any distro with deps)
+├── systemd/     # user-unit template
+└── scripts/     # loginext-logs (tail helper)
+config/
+├── example.json
+└── app_rules.example.txt
 ```
 
 ---

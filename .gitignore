@@ -204,3 +204,6 @@ ui/src-tauri/target/release/bundle/
 # *must* be tracked. They were previously ignored by mistake; the rule
 # excluded them from clean GitHub clones and broke contributors who
 # relied on agents.md as the rulebook.
+deploy/src/
+deploy/pkg/
+deploy/*.pkg.tar.*

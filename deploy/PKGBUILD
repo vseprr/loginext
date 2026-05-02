@@ -1,0 +1,153 @@
+# Maintainer: vseprr <noreply@example.com>
+#
+# loginext-git — VCS package. Tracks the git HEAD of the LogiNext repo so a
+# `makepkg -si` after every `git pull` builds against the latest commit and
+# `pacman` cleanly upgrades over the previously installed copy.
+#
+#   cd deploy
+#   makepkg -si               # build + install (or upgrade)
+#   sudo pacman -R loginext-git   # remove
+#
+# The recipe builds both halves of the project: the C++ daemon (`loginext`)
+# and the Tauri UI (`loginext-ui`). Everything lands in /usr/bin so a normal
+# user PATH picks it up without LD_PRELOAD or shell-rc edits.
+#
+# Why the -git suffix: pkgver() resolves at build time from `git describe`,
+# so the version string updates automatically as the codebase moves. There
+# is no GitHub release to track yet — the git tip is the source of truth.
+
+pkgname=loginext-git
+_pkgname=loginext
+pkgver=r18.e15f4c6
+pkgrel=1
+pkgdesc="Userspace daemon + Tauri UI giving Logitech mice on Linux per-control customisation (Options+ on Linux). VCS build."
+arch=('x86_64')
+url='https://github.com/vseprr/loginext'
+license=('MIT')
+
+# Runtime deps:
+#   - libevdev: exclusive grab + event decoding for the mouse
+#   - libxcb / xcb-util-wm: X11 active-window detector (per-app scope)
+#   - webkit2gtk-4.1, gtk3, libayatana-appindicator, librsvg: Tauri UI runtime
+depends=(
+    'libevdev'
+    'libxcb'
+    'xcb-util-wm'
+    'webkit2gtk-4.1'
+    'gtk3'
+    'libayatana-appindicator'
+    'librsvg'
+)
+
+makedepends=(
+    'git'
+    'cmake'
+    'ninja'
+    'pkgconf'
+    'gcc'
+    'rust'
+    'nodejs'
+    'npm'
+)
+
+provides=("${_pkgname}=${pkgver}")
+conflicts=("${_pkgname}")
+
+# `git+file://...` is rewritten to the actual remote when the recipe is moved
+# out of the repo. The `#branch=main` fragment pins the build to the trunk so
+# a malicious tag cannot silently change the upgrade payload.
+source=("${_pkgname}::git+https://github.com/vseprr/loginext.git#branch=main")
+sha256sums=('SKIP')
+
+pkgver() {
+    cd "${srcdir}/${_pkgname}"
+    # `git describe` first (uses the most recent annotated tag if any);
+    # fall back to a commit-count + short-hash form for an untagged trunk.
+    if git describe --long --tags &>/dev/null; then
+        git describe --long --tags |
+            sed 's/\([^-]*-g\)/r\1/;s/-/./g'
+    else
+        printf 'r%s.%s' \
+            "$(git rev-list --count HEAD)" \
+            "$(git rev-parse --short HEAD)"
+    fi
+}
+
+prepare() {
+    cd "${srcdir}/${_pkgname}"
+    # Tauri pulls Rust crates over the network; warm the cache here so the
+    # build phase fails fast on a missing toolchain rather than mid-link.
+    if [[ -d ui ]]; then
+        cd ui
+        npm install --no-fund --no-audit
+    fi
+}
+
+build() {
+    cd "${srcdir}/${_pkgname}"
+
+    # ── Daemon ───────────────────────────────────────────────────────────
+    # Distribution-friendly: -DLOGINEXT_NATIVE=OFF disables -march=native so
+    # the resulting package is portable across x86_64 microarchitectures.
+    # LTO stays on — it's portable and meaningful for hot-path code.
+    cmake -S . -B build -G Ninja \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=/usr \
+        -DLOGINEXT_LTO=ON \
+        -DLOGINEXT_NATIVE=OFF
+    cmake --build build
+
+    # ── UI ──────────────────────────────────────────────────────────────
+    cd ui
+    # `--bundles deb` skips AppImage / RPM bundlers — we install via the
+    # PKGBUILD itself, the Tauri-produced .deb is just incidental output.
+    npm run tauri build -- --bundles deb || true
+    [[ -x src-tauri/target/release/loginext-ui ]] ||
+        { echo "Tauri build did not produce loginext-ui"; exit 1; }
+}
+
+package() {
+    cd "${srcdir}/${_pkgname}"
+
+    # Daemon binary
+    install -Dm0755 build/loginext              "${pkgdir}/usr/bin/loginext"
+
+    # UI binary
+    install -Dm0755 ui/src-tauri/target/release/loginext-ui \
+                                                "${pkgdir}/usr/bin/loginext-ui"
+
+    # Desktop entry + icon (system-wide, so the launcher picks it up for
+    # every user on the machine).
+    install -Dm0644 ui/src-tauri/icons/icon.png \
+                                                "${pkgdir}/usr/share/icons/hicolor/512x512/apps/loginext.png"
+
+    install -Dm0644 /dev/stdin "${pkgdir}/usr/share/applications/loginext.desktop" <<EOF
+[Desktop Entry]
+Type=Application
+Name=LogiNext
+GenericName=Logitech Device Control
+Comment=Configure Logitech mouse bindings and sensitivity
+Exec=env WEBKIT_DISABLE_DMABUF_RENDERER=1 /usr/bin/loginext-ui
+Icon=loginext
+Terminal=false
+Categories=Utility;Settings;HardwareSettings;
+Keywords=logitech;mouse;mx;master;input;
+StartupWMClass=LogiNext
+EOF
+
+    # systemd user unit (optional; the UI spawns the daemon on demand).
+    install -Dm0644 deploy/systemd/loginext.service \
+                                                "${pkgdir}/usr/lib/systemd/user/loginext.service"
+
+    # Documentation + license.
+    install -Dm0644 LICENSE   "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+    install -Dm0644 README.md "${pkgdir}/usr/share/doc/${pkgname}/README.md"
+
+    # Sample sidecar config — users copy it to ~/.config/loginext/
+    install -Dm0644 config/example.json \
+                                                "${pkgdir}/usr/share/doc/${pkgname}/config.example.json"
+    if [[ -f config/app_rules.example.txt ]]; then
+        install -Dm0644 config/app_rules.example.txt \
+                                                "${pkgdir}/usr/share/doc/${pkgname}/app_rules.example.txt"
+    fi
+}

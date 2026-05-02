@@ -7,7 +7,13 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 find_package(PkgConfig REQUIRED)
-pkg_check_modules(LIBEVDEV REQUIRED IMPORTED_TARGET libevdev)
+find_package(Threads REQUIRED)
+pkg_check_modules(LIBEVDEV   REQUIRED IMPORTED_TARGET libevdev)
+# libxcb + xcb-icccm power the X11 active-window listener (Phase 2.5).
+# Both are tiny protocol libraries — fit the same "thin syscall wrapper"
+# slot as libevdev. Required because Phase 2.5 depends on per-app scope.
+pkg_check_modules(LIBXCB     REQUIRED IMPORTED_TARGET xcb)
+pkg_check_modules(LIBXCB_ICCCM REQUIRED IMPORTED_TARGET xcb-icccm)
 
 add_executable(loginext
     src/main.cpp
@@ -20,6 +26,9 @@ add_executable(loginext
     src/heuristics/scroll_state.cpp
     src/ipc/server.cpp
     src/ipc/dispatch.cpp
+    src/scope/listener.cpp
+    src/scope/rules.cpp
+    src/scope/rules_loader.cpp
     src/util/log.cpp
 )
 
@@ -29,6 +38,9 @@ target_include_directories(loginext PRIVATE
 
 target_link_libraries(loginext PRIVATE
     PkgConfig::LIBEVDEV
+    PkgConfig::LIBXCB
+    PkgConfig::LIBXCB_ICCCM
+    Threads::Threads
 )
 
 target_compile_options(loginext PRIVATE

@@ -6,6 +6,15 @@ The 2026-04-19 audit catalogued 15 findings (F1–F15). F1–F4, F7–F9, F11–
 
 ---
 
+## Per-app scope listener quirks (2026-05-03)
+
+- **Hash 0 is reserved as the global sentinel.** `scope::hash_app()` re-rolls into `fnv_prime` if the FNV-1a result happens to land on 0. A different rule store implementation (e.g. cuckoo, robin-hood) must preserve this invariant: the hot-path `lookup()` short-circuits on 0 and an in-table 0 would mark the slot empty. Don't change without coordinated edits to both `app_hash.hpp` and `rules.hpp`.
+- **Listener publishes via `memory_order_relaxed`.** The atomic carries an integer, not a pointer; the only happens-before requirement is "eventually visible". A focus change racing with a thumb-wheel emit can produce one event resolved against the previous app's preset — that's an accepted behaviour, not a bug. Do not add stronger orderings unless you can demonstrate a correctness violation.
+- **Hyprland backend uses `socket2.sock` (event stream), not `socket.sock` (request channel).** The two sockets have similar names and very different semantics; using the request channel would require active polling, which defeats the whole point of an async listener.
+- **X11 backend prefers `WM_CLASS.instance_name` over `class_name`.** Firefox reports `Navigator` as the class but `navigator` as the instance — and Chrome / Chromium follow the same pattern. Instance name is more specific and matches what a user typing `firefox` in `app_rules.txt` actually expects (after lower-casing). Some niche apps publish only the class name; the loop falls back to it automatically.
+- **Wayland-other compositors (Sway, KWin, …) are not yet wired.** The thread idles in those sessions and the daemon resolves every event against the global preset. Adding a backend is a new arm in `listener.cpp::thread_main()`; the surrounding infrastructure is already correct.
+- **Listener thread holds a libxcb connection for the lifetime of the daemon.** That's intentional — reconnect cost is non-trivial (atom interns, root attribute change-mask) and the X server is the long-lived peer. If `xcb_connection_has_error()` fires the loop exits and the daemon falls back to global-only resolution; restart the daemon to recover.
+
 ## Quirks of the `--debug-events` flag (2026-05-02)
 
 - **Dump goes to stderr, not stdout.** Stdout is reserved for the daemon's line-delimited JSON IPC stream; mixing the raw event dump in would corrupt any consumer reading from a pipe. Stderr also matches the rest of the daemon's lifecycle output, so `sudo ./build/loginext --debug-events 2>&1 | grep KEY` works as expected during discovery.

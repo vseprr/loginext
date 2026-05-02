@@ -8,12 +8,13 @@ If you are about to add code on the hot path or touch the daemon's signal / IPC 
 
 ## Hot-path rules
 
-1. **Zero heap allocation in the event loop.** No `new`, no `malloc`, no `std::string` operations, no STL containers that may grow. All hot-path state is fixed-capacity, on the stack, owned by `AppContext` / `ScrollState` / `PacingQueue` / `PacingQueue::ring`.
+1. **Zero heap allocation in the event loop.** No `new`, no `malloc`, no `std::string` operations, no STL containers that may grow. All hot-path state is fixed-capacity, on the stack, owned by `AppContext` / `ScrollState` / `PacingQueue` / `PacingQueue::ring` / `scope::RuleTable`.
 2. **No virtual dispatch on the hot path.** Polymorphism, when needed, is `std::variant` or compile-time dispatch.
-3. **Single-thread.** The event loop is the only consumer of the device fd, the timerfd, and the IPC sockets. Any background work (e.g. future Wayland active-window subscription) must arrive on a fd registered with the same `epoll`.
-4. **Bounded I/O.** Every `read()` / `write()` checks the return value. Partial reads on the timerfd short-circuit. UDS writes are best-effort; SIGPIPE is ignored at startup so a dead UI client cannot kill the daemon mid-write.
-5. **Async-signal-safety in handlers.** Signal handlers only flip `volatile sig_atomic_t` flags (`g_stop`, `g_reload`). Everything else happens on the next loop iteration in the main thread.
-6. **No SA_RESTART.** `epoll_wait` is allowed to return `EINTR` so the loop re-checks `g_stop` / `g_reload` immediately on signal delivery.
+3. **Single-thread on the event loop fd.** The event loop is the only consumer of the device fd, the timerfd, and the IPC sockets. Background workers communicate by writing to a `std::atomic<T>` only — never via shared mutable structures. The Phase 2.5 active-window listener is the canonical example: a dedicated `pthread` owns the X11 / Hyprland connection, drains compositor events, and publishes the current focused-app FNV-1a hash into `scope::Listener::active_app_hash`. The hot path reads it with `memory_order_relaxed`. Any future asynchronous subscription (per-device hot-plug, network status, …) must follow the same pattern: own a thread, never touch `epoll_fd`, expose state as a single integer-sized atomic.
+4. **No `std::string` comparison on the hot path.** Per-app rule lookup, like every other hot-path comparison, is integer-only. App identifiers (X11 WM_CLASS, Hyprland window class) are FNV-1a hashed to a `uint32_t` at compositor-event time on the listener thread, then matched against `scope::RuleTable` (a 64-slot, power-of-two, open-addressed flat array) with one mask + one probe. The 0 hash is reserved as the global-fallback sentinel so the lookup short-circuits without an extra branch. Adding a new comparison? It must reduce to integer arithmetic before it ships.
+5. **Bounded I/O.** Every `read()` / `write()` checks the return value. Partial reads on the timerfd short-circuit. UDS writes are best-effort; SIGPIPE is ignored at startup so a dead UI client cannot kill the daemon mid-write.
+6. **Async-signal-safety in handlers.** Signal handlers only flip `volatile sig_atomic_t` flags (`g_stop`, `g_reload`). Everything else happens on the next loop iteration in the main thread.
+7. **No SA_RESTART.** `epoll_wait` is allowed to return `EINTR` so the loop re-checks `g_stop` / `g_reload` immediately on signal delivery.
 
 ## Reload path (the documented exception)
 
@@ -23,6 +24,18 @@ Reload is *not* a hot path in steady state — it fires once per user-initiated 
 - Parse uses the in-tree flat parser (`config/loader.cpp`). No JSON library.
 - Reload runs on the event-loop thread; the deferred-ack pattern in `dispatch.cpp::handle_reload` defers the IPC ack until *after* the new settings are live, so the UI can rely on success meaning success.
 - Gesture state is reset (`app->scroll = {}`) — never patched field-by-field.
+
+## Per-app scope (Phase 2.5)
+
+Hot-path resolution of "which preset applies to the focused window" is one of the loadest paths in the codebase — every `REL_HWHEEL` tick that survives the heuristic engine consults it. Mandatory shape:
+
+- **Async listener thread.** The compositor is a blocking peer (X11 PropertyNotify, Hyprland event stream). Reading it from the event loop would couple thumb-wheel latency to the desktop session's responsiveness — unacceptable. The listener is therefore a dedicated `pthread` that owns its connection fd, blocks on `select()` over the connection plus a self-pipe, and writes one `uint32_t` per focus change. Shutdown wakes it via the self-pipe so `pthread_join` is instant.
+- **Hot path is integer-only.** One `std::atomic<uint32_t>::load(memory_order_relaxed)` + one masked open-addressing probe in `scope::RuleTable`. Capacity is a power of two so the index step is `& (capacity - 1)`. Hash 0 is the global-fallback sentinel; the lookup short-circuits on it without an extra branch.
+- **No string surface past load time.** Compositor names (`firefox`, `code`, …) are FNV-1a hashed once on the listener thread (focus-change rate, ≤10 Hz) and once at config load (per rule in `app_rules.txt`). The hot path does not see character data, ever.
+- **Most-specific-match-first with global fallback.** `scope::lookup()` returns false on hash==0 or on miss; the on_event handler then falls back to `Settings::active_preset` without an extra branch (the fallback already lives in a local).
+- **Reload path mirrors config.** `app_rules.txt` is parsed with the same `open()` + `read()` + 4 KiB stack buffer pattern as `config.json`. `SIGHUP` triggers both. The JSON parser is not extended — adding a nested array there would violate the "no framework" rule, and a one-rule-per-line text file is genuinely the right shape.
+
+If you add a new compositor backend (Sway, KWin, Mir), the rule is the same: the new backend lives inside `scope::listener.cpp::thread_main()` as a new branch, exits via the same `stop` atomic + self-pipe, and writes to the same `active_app_hash`. Never expose a second atomic, never lock, never let the listener call back into AppContext.
 
 ## IPC surface
 

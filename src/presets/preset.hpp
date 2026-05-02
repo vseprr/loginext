@@ -29,6 +29,7 @@ namespace loginext::presets {
 // the end so existing config files keep their semantics.
 enum class PresetId : uint8_t {
     TabNav = 0,
+    Zoom,                         // Ctrl+= / Ctrl+- (browser-style zoom)
     Count,                        // sentinel; not a real preset
 };
 constexpr uint8_t preset_count = static_cast<uint8_t>(PresetId::Count);
@@ -55,6 +56,7 @@ struct Preset {
 constexpr const char* preset_id_str(PresetId p) noexcept {
     switch (p) {
         case PresetId::TabNav: return "tab_nav";
+        case PresetId::Zoom:   return "zoom";
         case PresetId::Count:  break;
     }
     return "tab_nav";
@@ -63,6 +65,7 @@ constexpr const char* preset_id_str(PresetId p) noexcept {
 constexpr const char* preset_name(PresetId p) noexcept {
     switch (p) {
         case PresetId::TabNav: return "Navigate between tabs";
+        case PresetId::Zoom:   return "Zoom in / out";
         case PresetId::Count:  break;
     }
     return "Navigate between tabs";
@@ -78,12 +81,25 @@ constexpr Preset preset_tab_nav = {
     .on_right = { { KEY_LEFTCTRL, KEY_TAB, 0, 0 },             2 },
 };
 
+// Zoom — universal browser / IDE / editor zoom shortcut. Ctrl+= is what
+// Chromium / Firefox / VS Code / GTK apps all bind to "zoom in" (Ctrl+'+'
+// without needing Shift on most US layouts), Ctrl+- to "zoom out".
+// Stays in the key-combo model so it does NOT touch the emitter, the pacer,
+// the heuristic, or the NBT entry — strictly additive per agents.md rule 8.
+//   right tick → Ctrl+=  (zoom in)
+//   left  tick → Ctrl+-  (zoom out)
+constexpr Preset preset_zoom = {
+    .on_left  = { { KEY_LEFTCTRL, KEY_MINUS, 0, 0 }, 2 },
+    .on_right = { { KEY_LEFTCTRL, KEY_EQUAL, 0, 0 }, 2 },
+};
+
 // O(1) lookup. Falls back to NBT on out-of-range to keep the hot path
 // branch-free of error handling — the value comes from a uint8_t enum
 // validated at config-load time.
 constexpr const Preset& preset_for(PresetId id) noexcept {
     switch (id) {
         case PresetId::TabNav: return preset_tab_nav;
+        case PresetId::Zoom:   return preset_zoom;
         case PresetId::Count:  break;
     }
     return preset_tab_nav;
@@ -111,6 +127,7 @@ constexpr bool preset_id_from_str(const char* s, std::size_t n, PresetId& out) n
         return i == n && lit[i] == '\0';
     };
     if (eq("tab_nav")) { out = PresetId::TabNav; return true; }
+    if (eq("zoom"))    { out = PresetId::Zoom;   return true; }
     return false;
 }
 

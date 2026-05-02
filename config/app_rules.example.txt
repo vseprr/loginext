@@ -1,0 +1,41 @@
+# LogiNext — per-application preset overrides (Phase 2.5)
+#
+# One rule per line: <app_id>=<preset_id>
+#
+# `app_id` is the focused window's class / instance. The daemon uses:
+#   - Hyprland: the window class reported by the IPC event stream
+#   - X11:      the WM_CLASS instance name (or class name as fallback)
+# Names are case-insensitive — they're FNV-1a hashed at config-load time
+# so the daemon's hot path only ever does an integer lookup against an
+# atomic-published hash. No string comparison ever runs on the event loop.
+#
+# `preset_id` must match one of the strings registered in
+# src/presets/preset.hpp (preset_id_str): currently `tab_nav` or `zoom`.
+#
+# Most-specific match wins: if no rule matches the focused window, the
+# global preset from config.json (`active_preset`) applies as fallback.
+#
+# Lines starting with '#' and blank lines are ignored.
+#
+# Drop this file at $XDG_CONFIG_HOME/loginext/app_rules.txt (default
+# ~/.config/loginext/app_rules.txt) and run `pkill -HUP loginext` (or
+# click any UI control that triggers a reload) to apply.
+
+# ── Examples ────────────────────────────────────────────────────────────
+
+# Browsers — keep tab navigation on the thumb wheel.
+firefox=tab_nav
+navigator=tab_nav
+chromium=tab_nav
+google-chrome=tab_nav
+
+# Editors / IDEs — usually nicer with zoom on the wheel.
+code=zoom
+code-oss=zoom
+jetbrains-idea=zoom
+
+# Image / PDF viewers — zoom is the obvious binding.
+gimp=zoom
+inkscape=zoom
+org.gnome.evince=zoom
+zathura=zoom
