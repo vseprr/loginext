@@ -22,6 +22,8 @@ For implementation rules see [agents.md](./agents.md). For active performance di
 
 **Production lifecycle (2026-04-26).** Detached daemon spawn from the Tauri shell (`setsid`, stdio → `/dev/null`); UI close no longer kills the daemon, reopening silently reconnects. Backoff-aware heartbeat with auto-respawn. File logger writes to `$XDG_STATE_HOME/loginext/daemon.log`; stderr is now lifecycle-only. CSS rebuilt as true soft neumorphism — segmented options are individually-raised pills that deboss into the surface when active. Daemon default mode flipped to `Medium` so the UI's first paint matches reality. Systemd user-unit template + `loginext-logs` tail helper landed under [deploy/](./deploy).
 
+**Hardware discovery / `--debug-events` flag (2026-05-02).** New CLI flag dumps every raw `input_event` drained from `libevdev` to stderr (`type` + name, `code` + name, `value`) for mapping unknown buttons (Gesture, Back/Forward, Mode-shift) on the MX Master 3S. Lives entirely in the C++ daemon — UI is untouched. The check inside the drain loop is `__builtin_expect(debug_events, 0)`, so the production path (flag off) takes one predicted-not-taken branch and no fprintf. Workflow: SYSTEM OFFLINE in the UI → `sudo ./build/loginext --debug-events` in a terminal → press buttons → Ctrl+C → SYSTEM ONLINE. Stderr-only on purpose so the dump never collides with the line-delimited JSON IPC stream on stdout.
+
 **Persistent daemon toggle + advanced UI status feedback (2026-04-26).** Status bar now hosts a single SYSTEM ONLINE / SYSTEM OFFLINE neumorphic button that doubles as the indicator and the kill-switch. Click flips a `daemon_forced_off` flag in `localStorage`; intent survives UI restarts so a user-stopped daemon stays stopped after a relaunch (the Tauri shell's auto-spawn is countermanded by an immediate `kill_daemon` IPC on first paint). Online state breathes a green `box-shadow` pulse via a custom `@keyframes`; offline state holds a static red glow; both keep the dual-shadow neumorphic depth, with `transform: scale(0.98)` + debossed inset on press. New `kill_daemon` Tauri command walks `/proc` to locate `loginext`, sends SIGTERM, polls the socket for clean shutdown, and escalates to SIGKILL only on a wedge.
 
 ---
@@ -31,6 +33,12 @@ For implementation rules see [agents.md](./agents.md). For active performance di
 ### Phase 2.4 — Tab-nav preset polish
 - [ ] Preset selector dropdown (Navigate-between-tabs is currently the only entry; needs a chooser when other presets land — daemon side is ready, see `presets/preset.hpp` + `Settings::active_preset`).
 - [ ] Live preview overlay: stream emitted Tab events back to the UI while the window is open (multi-message IPC channel — currently every request is one round-trip).
+
+### Phase 2.5 — Device profiles for new MX Master 3S buttons (next up)
+- [ ] Use `--debug-events` to capture raw signatures for: Gesture button (under thumb), Back, Forward, Mode-shift, vertical wheel click. Record the (`type`, `code`, `value`) sequences and pin them to a doc note for reproducibility.
+- [ ] Codify the mapping as a constexpr "MX Master 3S" device profile (`presets/mx_master_3s.hpp` or extend `presets/preset.hpp`) — additive only, must not retune NBT or touch `config::Profile`.
+- [ ] Extend `heuristics/` with per-button state where needed (e.g. Gesture-button + REL_X/REL_Y → directional gesture); the engine still emits only abstract directions, the preset table does the action lookup.
+- [ ] Wire each new control through `ipc/list_controls` so the UI can populate them without further daemon changes.
 
 ### Phase 2.5 — Scope: global vs per-app
 - [ ] Rule-scope selector: "All applications" | "Only in…".

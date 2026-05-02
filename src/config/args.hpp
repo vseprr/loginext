@@ -15,6 +15,7 @@ struct CliOptions {
     bool            help = false;
     bool            quiet = false;    // suppress stderr (file log still active)
     bool            verbose = false;  // lower file-log threshold to Trace
+    bool            debug_events = false;  // dump raw libevdev events to stderr (hardware discovery)
 };
 
 // Returns 0 on success, nonzero on error. Prints usage on --help or error.

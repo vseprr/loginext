@@ -15,6 +15,7 @@ void print_usage(const char* prog) {
         "  --config=PATH     path to JSON config  (default: $XDG_CONFIG_HOME/loginext/config.json)\n"
         "  --quiet           suppress stderr (file log keeps running)\n"
         "  --verbose         file log includes per-event traces\n"
+        "  --debug-events    dump raw libevdev events to stderr (hardware discovery; use with UI offline)\n"
         "  --help            show this message\n"
         "\n"
         "SIGHUP reloads the config file without restarting.\n"
@@ -46,13 +47,14 @@ int parse_args(int argc, char* argv[], CliOptions& out) {
         {"config",  required_argument, nullptr, 'c'},
         {"quiet",   no_argument,       nullptr, 'q'},
         {"verbose", no_argument,       nullptr, 'v'},
+        {"debug-events", no_argument,  nullptr, 'd'},
         {"help",    no_argument,       nullptr, 'h'},
         {nullptr, 0, nullptr, 0},
     };
 
     int c;
     int idx = 0;
-    while ((c = getopt_long(argc, argv, "m:i:c:qvh", long_opts, &idx)) != -1) {
+    while ((c = getopt_long(argc, argv, "m:i:c:qvdh", long_opts, &idx)) != -1) {
         switch (c) {
             case 'm':
                 if (!parse_mode(optarg, out.mode)) {
@@ -76,6 +78,9 @@ int parse_args(int argc, char* argv[], CliOptions& out) {
                 break;
             case 'v':
                 out.verbose = true;
+                break;
+            case 'd':
+                out.debug_events = true;
                 break;
             case 'h':
                 out.help = true;

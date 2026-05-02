@@ -244,12 +244,17 @@ int main(int argc, char* argv[]) {
     LX_INFO("running — SIGHUP reloads config, SIGTERM/Ctrl+C to stop");
 
     // --- Hot path (zero heap allocations from here) ---
+    if (cli.debug_events) {
+        LX_INFO("debug-events mode active: raw input_event dump on stderr");
+    }
+
     loginext::core::run_loop(loop, dev.fd, dev.evdev,
                              &g_stop, &g_reload,
                              on_event,  &app,
                              on_timer,  &app,
                              on_reload, &app,
-                             on_io,     &app);
+                             on_io,     &app,
+                             cli.debug_events);
 
     // --- Teardown (reverse order of init) ---
     LX_INFO("shutting down");

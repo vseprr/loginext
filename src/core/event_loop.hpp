@@ -32,13 +32,18 @@ struct EventLoop {
 // Block on epoll, drain libevdev events, dispatch through callbacks.
 // Runs until *stop becomes true (set by SIGINT/SIGTERM handler).
 // *reload is consumed (reset to 0) after each reload_cb invocation.
+// `debug_events` is a hardware-discovery flag: when true, every raw input_event
+// drained from libevdev is dumped to stderr before normal dispatch. The check
+// is a single predicted-not-taken branch; production runs (default false) pay
+// nothing measurable.
 void run_loop(EventLoop& loop, int device_fd, void* evdev,
               volatile sig_atomic_t* stop,
               volatile sig_atomic_t* reload,
               EventCallback  event_cb,  void* event_ctx,
               TimerCallback  timer_cb,  void* timer_ctx,
               ReloadCallback reload_cb, void* reload_ctx,
-              IoCallback     io_cb,     void* io_ctx) noexcept;
+              IoCallback     io_cb,     void* io_ctx,
+              bool           debug_events) noexcept;
 
 // Close the epoll fd.
 void shutdown_loop(EventLoop& loop) noexcept;

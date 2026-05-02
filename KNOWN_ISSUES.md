@@ -6,6 +6,13 @@ The 2026-04-19 audit catalogued 15 findings (F1–F15). F1–F4, F7–F9, F11–
 
 ---
 
+## Quirks of the `--debug-events` flag (2026-05-02)
+
+- **Dump goes to stderr, not stdout.** Stdout is reserved for the daemon's line-delimited JSON IPC stream; mixing the raw event dump in would corrupt any consumer reading from a pipe. Stderr also matches the rest of the daemon's lifecycle output, so `sudo ./build/loginext --debug-events 2>&1 | grep KEY` works as expected during discovery.
+- **Bypasses `LX_*` log levels on purpose.** The dump uses `std::fprintf(stderr, …)` directly so it appears even with `--quiet`, and so it doesn't pollute the structured file log at `$XDG_STATE_HOME/loginext/daemon.log` with Trace-volume entries.
+- **Requires SYSTEM OFFLINE in the UI before launch.** The auto-spawned daemon already holds the exclusive `libevdev` grab; a second instance will fail to grab. Click SYSTEM OFFLINE first (the `daemon_forced_off` flag in `localStorage` keeps it dead through any UI restart), run the discovery binary in a terminal, then click SYSTEM ONLINE to hand the device back.
+- **The hot-path branch is `__builtin_expect(debug_events, 0)`.** Do not refactor it into a `std::function` callback or a virtual hook — the whole point is that production runs pay one predicted-not-taken byte test and nothing else.
+
 ## Deferred findings — *do not "fix" these without reading the rationale*
 
 ### F5 — `default_config_path()` allocates `std::string` on every call

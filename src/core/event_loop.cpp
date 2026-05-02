@@ -50,7 +50,8 @@ void run_loop(EventLoop& loop, int device_fd, void* evdev_raw,
               EventCallback  event_cb,  void* event_ctx,
               TimerCallback  timer_cb,  void* timer_ctx,
               ReloadCallback reload_cb, void* reload_ctx,
-              IoCallback     io_cb,     void* io_ctx) noexcept {
+              IoCallback     io_cb,     void* io_ctx,
+              bool           debug_events) noexcept {
 
     auto* evdev = static_cast<libevdev*>(evdev_raw);
     constexpr int timeout_ms = -1;
@@ -84,6 +85,19 @@ void run_loop(EventLoop& loop, int device_fd, void* evdev_raw,
                         continue;
                     }
                     flags = LIBEVDEV_READ_FLAG_NORMAL;
+                    // Hardware-discovery dump. `__builtin_expect` keeps the
+                    // production fall-through (debug_events==false) on the
+                    // straight-line path; the fprintf is reached only when an
+                    // operator explicitly asked for it.
+                    if (__builtin_expect(debug_events, 0)) {
+                        const char* type_name = libevdev_event_type_get_name(ev.type);
+                        const char* code_name = libevdev_event_code_get_name(ev.type, ev.code);
+                        std::fprintf(stderr,
+                            "[debug-events] type=%s(0x%02x) code=%s(0x%03x) value=%d\n",
+                            type_name ? type_name : "?", ev.type,
+                            code_name ? code_name : "?", ev.code,
+                            ev.value);
+                    }
                     event_cb(ev, event_ctx);
                 }
                 if (rc != -EAGAIN && rc != -EINTR) {
