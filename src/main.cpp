@@ -251,7 +251,7 @@ int main(int argc, char* argv[]) {
     // IPC bring-up. A failure here is non-fatal: the daemon still does its
     // primary job (tab switching) even if the UI channel is dead.
     app.epoll_fd = loop.epoll_fd;
-    app.ipc_ctx  = { &app.settings, &g_reload };
+    app.ipc_ctx  = { &app.settings, &g_reload, -1, &app.scope, &app.rules };
 
     if (loginext::ipc::init_server(app.ipc) == 0) {
         epoll_event ev{};

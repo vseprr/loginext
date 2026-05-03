@@ -19,6 +19,7 @@ BIN_DIR="$HOME/.local/bin"
 APPS_DIR="$HOME/.local/share/applications"
 ICONS_DIR="$HOME/.local/share/icons"
 SYSTEMD_USER_DIR="$HOME/.config/systemd/user"
+KWIN_SCRIPT_DIR="$HOME/.local/share/kwin/scripts/loginext-focus"
 
 DAEMON_DST="$BIN_DIR/loginext"
 UI_DST="$BIN_DIR/loginext-ui"
@@ -55,7 +56,12 @@ done
 
 # ---- 1. system deps ---------------------------------------------------------
 step "Installing system dependencies (pacman)"
-PAC_PKGS=(base-devel cmake ninja pkgconf libevdev nodejs npm rustup webkit2gtk-4.1 gtk3 libayatana-appindicator librsvg)
+PAC_PKGS=(
+    base-devel cmake ninja pkgconf
+    libevdev libxcb xcb-util-wm wayland systemd-libs
+    nodejs npm rustup
+    webkit2gtk-4.1 gtk3 libayatana-appindicator librsvg
+)
 if command -v pacman &>/dev/null; then
     sudo pacman -S --needed --noconfirm "${PAC_PKGS[@]}"
     ok "pacman packages present"
@@ -141,7 +147,57 @@ if command -v gtk-update-icon-cache &>/dev/null; then
     gtk-update-icon-cache -q "$ICONS_DIR" &>/dev/null || true
 fi
 
-# ---- 7. systemd user unit ---------------------------------------------------
+# ---- 7. KWin focus-bridge script (KDE Plasma 6) ----------------------------
+# Plasma 6's KWin no longer advertises org_kde_plasma_window_management to
+# regular wayland clients, so the daemon's protocol backend can't see native
+# Wayland windows on a stock Plasma session. The KWin script below listens
+# for workspace.windowActivated and forwards each event to the daemon's
+# `org.loginext.WindowFocus.Activated` D-Bus method (the same pattern
+# kdotool uses). Installing it on non-KDE systems is harmless — KWin scripts
+# are only loaded by KWin.
+step "Installing KWin focus-bridge script"
+KWIN_SCRIPT_SRC="$REPO_ROOT/deploy/kwin/loginext-focus"
+if [[ -d "$KWIN_SCRIPT_SRC" ]]; then
+    mkdir -p "$KWIN_SCRIPT_DIR/contents/code"
+    install -m 0644 "$KWIN_SCRIPT_SRC/metadata.json"           "$KWIN_SCRIPT_DIR/metadata.json"
+    install -m 0644 "$KWIN_SCRIPT_SRC/contents/code/main.js"   "$KWIN_SCRIPT_DIR/contents/code/main.js"
+    ok "$KWIN_SCRIPT_DIR"
+else
+    warn "deploy/kwin/loginext-focus not found — skipping KWin bridge"
+fi
+
+# Enable + reload the script if the user is on KDE. We try Plasma 6 tools
+# first (kwriteconfig6 / qdbus6), then Plasma 5 (kwriteconfig5 / qdbus).
+# All steps are best-effort: a non-KDE host (or a headless install) just
+# skips this block and the daemon falls back to X11/Hyprland/etc.
+if [[ -d "$KWIN_SCRIPT_DIR" ]]; then
+    KW_OK=0
+    for KW_TOOL in kwriteconfig6 kwriteconfig5; do
+        if command -v "$KW_TOOL" &>/dev/null; then
+            "$KW_TOOL" --file kwinrc --group Plugins \
+                --key loginext-focusEnabled true >/dev/null 2>&1 || true
+            KW_OK=1
+            break
+        fi
+    done
+    if [[ $KW_OK -eq 1 ]]; then
+        # Ask KWin to re-read its config. If KWin isn't running (e.g. the
+        # install is happening over SSH before login), the qdbus call fails
+        # silently and the script will pick up the change on the next login.
+        for QD_TOOL in qdbus6 qdbus-qt6 qdbus; do
+            if command -v "$QD_TOOL" &>/dev/null; then
+                "$QD_TOOL" org.kde.KWin /KWin reconfigure >/dev/null 2>&1 || true
+                break
+            fi
+        done
+        ok "KWin focus bridge enabled (loginext-focusEnabled=true)"
+    else
+        warn "kwriteconfig{5,6} not found — enable the script manually:"
+        warn "  System Settings → Window Management → KWin Scripts → LogiNext Focus Bridge"
+    fi
+fi
+
+# ---- 8. systemd user unit ---------------------------------------------------
 step "Installing systemd user unit"
 mkdir -p "$SYSTEMD_USER_DIR"
 UNIT_SRC="deploy/systemd/loginext.service"

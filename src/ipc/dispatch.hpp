@@ -5,14 +5,28 @@
 #include <csignal>
 #include <cstddef>
 
+// Forward declare the scope types the introspection commands depend on so
+// the IPC layer doesn't pull in the listener-thread world. Both modules are
+// already linked into the daemon — this just keeps include directions clean.
+namespace loginext::scope {
+    struct Listener;
+    struct RuleTable;
+}
+
 namespace loginext::ipc {
 
 // Context pointer handed to the CommandHandler on every line. Keeps the
 // handler purely functional — no globals, no singletons.
+//
+// `scope` and `rules` are nullable: if the per-app scope listener never
+// started (older session, no compositor), the introspection commands
+// degrade gracefully instead of returning bogus data.
 struct DispatchCtx {
-    loginext::config::Settings* settings;
-    volatile sig_atomic_t*      reload_flag;  // raised to trigger SIGHUP-style reload
-    int                         reload_pending_fd = -1;  // client fd awaiting reload ack
+    loginext::config::Settings*       settings;
+    volatile sig_atomic_t*            reload_flag;       // raised to trigger SIGHUP-style reload
+    int                               reload_pending_fd = -1;  // client fd awaiting reload ack
+    loginext::scope::Listener*        scope = nullptr;
+    const loginext::scope::RuleTable* rules = nullptr;
 };
 
 // CommandHandler-compatible entry point. Parses the first "cmd" key out of

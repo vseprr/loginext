@@ -18,7 +18,7 @@
 
 pkgname=loginext-git
 _pkgname=loginext
-pkgver=r18.e15f4c6
+pkgver=r19.ef30121
 pkgrel=1
 pkgdesc="Userspace daemon + Tauri UI giving Logitech mice on Linux per-control customisation (Options+ on Linux). VCS build."
 arch=('x86_64')
@@ -28,17 +28,26 @@ license=('MIT')
 # Runtime deps:
 #   - libevdev: exclusive grab + event decoding for the mouse
 #   - libxcb / xcb-util-wm: X11 active-window detector (per-app scope)
+#   - wayland: KDE Plasma (legacy + wlroots) protocol backend
+#   - systemd-libs: sd-bus drives the KWin D-Bus bridge (Plasma 6 path)
 #   - webkit2gtk-4.1, gtk3, libayatana-appindicator, librsvg: Tauri UI runtime
 depends=(
     'libevdev'
     'libxcb'
     'xcb-util-wm'
+    'wayland'
+    'systemd-libs'
     'webkit2gtk-4.1'
     'gtk3'
     'libayatana-appindicator'
     'librsvg'
 )
 
+# wayland is also a makedep — pulls in wayland-scanner, the codegen we use
+# to turn protocols/plasma-window-management.xml into C bindings at build
+# time. Listing it as both depends + makedepends is correct: the runtime
+# library lives in libwayland-client, the codegen tool ships in the same
+# package, and pacman will install it once.
 makedepends=(
     'git'
     'cmake'
@@ -48,6 +57,7 @@ makedepends=(
     'rust'
     'nodejs'
     'npm'
+    'wayland'
 )
 
 provides=("${_pkgname}=${pkgver}")
@@ -138,6 +148,16 @@ EOF
     # systemd user unit (optional; the UI spawns the daemon on demand).
     install -Dm0644 deploy/systemd/loginext.service \
                                                 "${pkgdir}/usr/lib/systemd/user/loginext.service"
+
+    # KWin focus-bridge script — required on KDE Plasma 6 where KWin no
+    # longer exposes org_kde_plasma_window_management to regular wayland
+    # clients. Installed system-wide so every user on the host can enable it
+    # from System Settings → KWin Scripts. Harmless on non-KDE installs:
+    # KWin scripts are only loaded by KWin itself.
+    install -Dm0644 deploy/kwin/loginext-focus/metadata.json \
+                                                "${pkgdir}/usr/share/kwin/scripts/loginext-focus/metadata.json"
+    install -Dm0644 deploy/kwin/loginext-focus/contents/code/main.js \
+                                                "${pkgdir}/usr/share/kwin/scripts/loginext-focus/contents/code/main.js"
 
     # Documentation + license.
     install -Dm0644 LICENSE   "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"

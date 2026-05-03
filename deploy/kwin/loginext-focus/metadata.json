@@ -1,0 +1,22 @@
+{
+    "KPackageStructure": "KWin/Script",
+    "KPlugin": {
+        "Authors": [
+            {
+                "Email": "noreply@example.com",
+                "Name": "vseprr"
+            }
+        ],
+        "Description": "Forwards window-activation events to the LogiNext daemon via the user session bus. Required on KDE Plasma 6, where KWin no longer advertises org_kde_plasma_window_management to regular wayland clients.",
+        "EnabledByDefault": true,
+        "Id": "loginext-focus",
+        "License": "MIT",
+        "Name": "LogiNext Focus Bridge",
+        "ServiceTypes": [
+            "KWin/Script"
+        ],
+        "Version": "1"
+    },
+    "X-Plasma-API": "javascript",
+    "X-Plasma-MainScript": "code/main.js"
+}
