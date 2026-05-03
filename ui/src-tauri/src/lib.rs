@@ -13,6 +13,22 @@ fn write_config(sensitivity: String, invert_hwheel: bool) -> Result<(), String> 
     ipc_bridge::write_config(&sensitivity, invert_hwheel)
 }
 
+/// Returns the parsed contents of `~/.config/loginext/app_rules.txt` as a
+/// JSON envelope `{"ok":true,"rules":[...]}`. Missing file → empty rules.
+#[tauri::command]
+fn read_app_rules() -> String {
+    ipc_bridge::read_app_rules()
+}
+
+/// Atomically rewrite the rules file from the supplied list. The frontend
+/// then issues `request("reload")` so the daemon re-hashes the table.
+/// Splitting save + reload keeps the failure modes independent — a config
+/// validation error blocks the write before the daemon ever sees it.
+#[tauri::command]
+fn write_app_rules(rules: Vec<ipc_bridge::AppRuleEntry>) -> Result<(), String> {
+    ipc_bridge::write_app_rules(&rules)
+}
+
 /// Returns a small JSON envelope describing the daemon-side bring-up. The UI
 /// renders this into the status bar on first paint so the user knows whether
 /// the backend was already running, freshly spawned, or failed.
@@ -122,6 +138,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             ipc_request,
             write_config,
+            read_app_rules,
+            write_app_rules,
             daemon_status,
             daemon_respawn,
             kill_daemon,

@@ -18,7 +18,7 @@
 
 pkgname=loginext-git
 _pkgname=loginext
-pkgver=r19.ef30121
+pkgver=r20.f5c276e
 pkgrel=1
 pkgdesc="Userspace daemon + Tauri UI giving Logitech mice on Linux per-control customisation (Options+ on Linux). VCS build."
 arch=('x86_64')

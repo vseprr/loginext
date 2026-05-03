@@ -28,11 +28,22 @@ int setup_keyboard(int fd) noexcept {
     // Enable EV_KEY
     if (ioctl(fd, UI_SET_EVBIT, EV_KEY) < 0) return -1;
 
-    // Register the union of keys every shipping preset can emit. New presets
-    // that need additional keys must add them here at init — the hot path
-    // never touches UI_SET_KEYBIT.
-    for (int key : {KEY_LEFTCTRL, KEY_LEFTSHIFT, KEY_TAB}) {
-        if (ioctl(fd, UI_SET_KEYBIT, key) < 0) return -1;
+    // Register the union of keys every shipping preset can emit, derived
+    // straight from the preset table. uinput silently drops events for keys
+    // the device never declared at UI_SET_KEYBIT time — so a preset whose
+    // keys aren't enumerated here looks like "nothing happens" with no
+    // syscall failure to log. Iterating the table at init guarantees a new
+    // preset added to preset.hpp can never silently break the emitter.
+    // Hot path is unaffected: this runs once during init_emitter().
+    for (uint8_t i = 0; i < presets::preset_count; ++i) {
+        const presets::Preset& p = presets::preset_for(static_cast<presets::PresetId>(i));
+        for (const auto& combo : { p.on_left, p.on_right }) {
+            for (uint8_t k = 0; k < combo.count; ++k) {
+                uint16_t code = combo.keys[k];
+                if (code == 0) continue;
+                if (ioctl(fd, UI_SET_KEYBIT, code) < 0) return -1;
+            }
+        }
     }
 
     uinput_setup setup{};

@@ -390,6 +390,173 @@ html, body {
   margin-top: var(--space-5);
 }
 
+/* ─── Per-App Rules card (Phase 2.5 UI) ──────────────────────────── */
+/*
+ * Lives inside the middle column under "Available Presets". Mirrors the
+ * neumorphic vocabulary used elsewhere — raised pills for interactive
+ * elements, debossed inset wells for the rules list — so the section reads
+ * as native rather than a bolt-on.
+ */
+
+.rules-active {
+  margin-bottom: var(--space-4);
+}
+
+.rules-active__row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  box-shadow: var(--neu-in-sm);
+  min-height: 44px;
+}
+
+.rules-active__name {
+  flex: 1;
+  font-weight: 600;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rules-active__name--dim {
+  color: var(--text-faint);
+  font-weight: 400;
+  font-style: italic;
+}
+
+.rules-active__source {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--surface);
+  box-shadow: var(--neu-out-xs);
+}
+
+.rules-active__live {
+  font-size: 12px;
+  color: var(--text-accent);
+  font-weight: 500;
+}
+
+.rules-add {
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-accent);
+  background: var(--surface);
+  border: none;
+  padding: 6px 14px;
+  border-radius: 999px;
+  cursor: pointer;
+  box-shadow: var(--neu-out-xs);
+  transition: box-shadow var(--transition-fast),
+              transform 120ms ease,
+              color var(--transition-fast);
+}
+
+.rules-add:hover {
+  color: var(--accent);
+  box-shadow: var(--neu-out-sm), 0 0 12px var(--accent-glow-sm);
+  transform: translateY(-1px);
+}
+
+.rules-add:active {
+  transform: translateY(0) scale(0.98);
+  box-shadow: var(--neu-in-sm);
+}
+
+.rules-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.rules-empty {
+  font-size: 13px;
+  color: var(--text-faint);
+  font-style: italic;
+  padding: var(--space-2) var(--space-2);
+}
+
+.rule-row {
+  display: grid;
+  /* App name takes the rest, preset dropdown ~140px, delete is a circle. */
+  grid-template-columns: 1fr 140px 32px;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  box-shadow: var(--neu-out-xs);
+}
+
+.rule-row__app {
+  font-size: 13px;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+
+.rule-row__preset {
+  font: inherit;
+  font-size: 12px;
+  color: var(--text);
+  background: var(--surface);
+  border: none;
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  box-shadow: var(--neu-in-sm);
+  cursor: pointer;
+  appearance: none;
+}
+
+.rule-row__preset:focus {
+  outline: none;
+  box-shadow: var(--neu-in-sm), 0 0 0 2px var(--accent-glow);
+}
+
+.rule-row__delete {
+  font: inherit;
+  font-size: 18px;
+  line-height: 1;
+  font-weight: 400;
+  color: var(--text-faint);
+  background: var(--surface);
+  border: none;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  cursor: pointer;
+  box-shadow: var(--neu-out-xs);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: color var(--transition-fast),
+              box-shadow var(--transition-fast),
+              transform 120ms ease;
+}
+
+.rule-row__delete:hover {
+  color: #ff7a7a;
+  box-shadow: var(--neu-out-sm), 0 0 10px rgba(255, 122, 122, 0.25);
+  transform: translateY(-1px);
+}
+
+.rule-row__delete:active {
+  transform: translateY(0) scale(0.96);
+  box-shadow: var(--neu-in-sm);
+}
+
 /* ─── App header ─────────────────────────────────────────────────── */
 
 .app-header {

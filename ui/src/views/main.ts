@@ -4,6 +4,7 @@ import { toggle } from "../components/toggle";
 import { ipc, type SettingsResponse, type DevicesResponse,
          type ControlsResponse, type PresetsResponse,
          type Preset } from "../ipc/client";
+import { rulesCard } from "./rules";
 
 type Mode = "low" | "medium" | "high";
 
@@ -316,6 +317,12 @@ function controlColumn(): HTMLElement {
   // preset is shipped — until then the segmented Low/Medium/High control
   // remains the only interactive element on the panel and is unaffected.
   void renderPresetList(presetList);
+
+  // Per-app rules (Phase 2.5 UI). The card pulls its own data over IPC,
+  // owns the file-roundtrip lifecycle, and uses the page's existing toast
+  // helper for save/error surfacing — keeps the rules module decoupled
+  // from the rest of main.ts.
+  col.appendChild(rulesCard(showToast));
 
   return col;
 }

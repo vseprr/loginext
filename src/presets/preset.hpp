@@ -81,16 +81,17 @@ constexpr Preset preset_tab_nav = {
     .on_right = { { KEY_LEFTCTRL, KEY_TAB, 0, 0 },             2 },
 };
 
-// Zoom — universal browser / IDE / editor zoom shortcut. Ctrl+= is what
-// Chromium / Firefox / VS Code / GTK apps all bind to "zoom in" (Ctrl+'+'
-// without needing Shift on most US layouts), Ctrl+- to "zoom out".
+// Zoom — universal browser / IDE / editor zoom shortcut. Ctrl+Numpad+
+// and Ctrl+Numpad- are used instead of standard +/- to ensure universal
+// compatibility across all keyboard layouts (avoiding US-layout assumptions).
+// Chromium / Firefox / VS Code / GTK apps all bind these to zoom actions.
 // Stays in the key-combo model so it does NOT touch the emitter, the pacer,
 // the heuristic, or the NBT entry — strictly additive per agents.md rule 8.
-//   right tick → Ctrl+=  (zoom in)
-//   left  tick → Ctrl+-  (zoom out)
+//   right tick → Ctrl+Numpad+ (KEY_KPPLUS)  (zoom in)
+//   left  tick → Ctrl+Numpad- (KEY_KPMINUS) (zoom out)
 constexpr Preset preset_zoom = {
-    .on_left  = { { KEY_LEFTCTRL, KEY_MINUS, 0, 0 }, 2 },
-    .on_right = { { KEY_LEFTCTRL, KEY_EQUAL, 0, 0 }, 2 },
+    .on_left  = { { KEY_LEFTCTRL, KEY_KPMINUS, 0, 0 }, 2 }, // Ctrl + Numpad Minus
+    .on_right = { { KEY_LEFTCTRL, KEY_KPPLUS, 0, 0 }, 2 },  // Ctrl + Numpad Plus
 };
 
 // O(1) lookup. Falls back to NBT on out-of-range to keep the hot path

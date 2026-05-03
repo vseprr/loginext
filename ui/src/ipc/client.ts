@@ -56,6 +56,34 @@ export interface PresetsResponse extends IpcOk {
   active?: string;
 }
 
+// Per-app rule entry. `app` is the lookup key (X11 instance, Hyprland class,
+// KWin resourceName/Class) — case-insensitive on the daemon side because the
+// FNV-1a hash lower-cases ASCII before mixing. `preset` is one of the ids
+// returned by `list_presets`.
+export interface AppRule {
+  app: string;
+  preset: string;
+}
+
+export interface AppRulesResponse extends IpcOk {
+  rules: AppRule[];
+}
+
+// Active-window probe — what `get_active_app` reports. `name` is empty
+// before the listener has seen its first focus event, or when no listener
+// backend bound. `source` is the backend that reported it
+// ("kwin-dbus" / "x11" / "hyprland" / "kde-wayland" / "none").
+// `rule_matched` distinguishes "the per-app rule fired" from "fell back to
+// the global preset", which the UI surfaces in the focused-app row.
+export interface ActiveAppResponse extends IpcOk {
+  hash: string;            // "0x9de02622" — purely informational
+  name: string;
+  source: string;
+  preset: string;          // effective preset (after per-app override)
+  global_preset: string;   // current Settings::active_preset
+  rule_matched: boolean;
+}
+
 export async function request(cmd: string, extra: Record<string, unknown> = {}): Promise<IpcResult> {
   const payload = JSON.stringify({ cmd, ...extra });
   const raw = await invoke<string>("ipc_request", { line: payload });
@@ -75,6 +103,31 @@ export async function applySettings(
     sensitivity,
     invertHwheel,
   });
+  return request("reload");
+}
+
+// Read app_rules.txt via the Tauri-side helper (the daemon has no
+// `list_rules` IPC — string rules don't survive the FNV-1a hashing in
+// RuleTable, so the file is the source of truth).
+export async function listAppRules(): Promise<AppRulesResponse | IpcErr> {
+  const raw = await invoke<string>("read_app_rules");
+  try {
+    const parsed = JSON.parse(raw) as IpcResult & { rules?: AppRule[] };
+    if (parsed.ok) return parsed as AppRulesResponse;
+    return parsed as IpcErr;
+  } catch {
+    return { ok: false, err: "bad_response" };
+  }
+}
+
+// Atomic write + daemon reload. The Rust side rejects entries with
+// reserved characters before the write hits disk.
+export async function saveAppRules(rules: AppRule[]): Promise<IpcResult> {
+  try {
+    await invoke("write_app_rules", { rules });
+  } catch (e) {
+    return { ok: false, err: `save: ${String(e)}` };
+  }
   return request("reload");
 }
 
@@ -113,8 +166,12 @@ export const ipc = {
   listDevices:   () => request("list_devices") as Promise<DevicesResponse | IpcErr>,
   listControls:  () => request("list_controls") as Promise<ControlsResponse | IpcErr>,
   listPresets:   () => request("list_presets") as Promise<PresetsResponse | IpcErr>,
+  getActiveApp:  () => request("get_active_app") as Promise<ActiveAppResponse | IpcErr>,
   reload:        () => request("reload"),
   applySettings,
+  // Per-app rules: file-backed, UI is the editor.
+  listAppRules,
+  saveAppRules,
   // Lifecycle: report startup outcome + ask Tauri to re-probe / respawn.
   daemonStatus:  () => invokeDaemon("daemon_status"),
   daemonRespawn: () => invokeDaemon("daemon_respawn"),

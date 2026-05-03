@@ -83,10 +83,14 @@ void on_event(const input_event& ev, void* ctx) {
             // constexpr and the lookup is a single switch.
             const auto combo = loginext::presets::resolve(effective, dir);
             // Per-emit traces are file-only — would otherwise spam the
-            // interactive terminal during normal scrolling.
-            LX_TRACE("emit dir=%s preset=%s",
+            // interactive terminal during normal scrolling. Logs the
+            // *effective* preset (after per-app override) so the trace
+            // matches what actually gets emitted; logging active_preset
+            // here would silently mask per-app rule resolution bugs.
+            LX_TRACE("emit dir=%s preset=%s app_hash=0x%08x",
                      dir == loginext::heuristics::Direction::Right ? "right" : "left",
-                     loginext::presets::preset_id_str(app->settings.active_preset));
+                     loginext::presets::preset_id_str(effective),
+                     app_hash);
             loginext::core::enqueue_combo(app->pacer, combo, ts);
         }
 
