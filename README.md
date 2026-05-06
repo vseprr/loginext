@@ -67,10 +67,7 @@ Either way, **LogiNext appears in your application menu** — search for it and 
 - `libevdev` ≥ 1.13.
 - `libxcb` + `xcb-util-wm` (Phase 2.5 active-window listener for X11 sessions; absent on a pure-Wayland host the X11 backend just stays idle, but the build still requires the headers).
 - CMake ≥ 3.25, Ninja, GCC 14+ or Clang 18+.
-- Read access to `/dev/input/eventX` and read/write access to `/dev/uinput`. Either:
-  - membership in the `input` group, **or**
-  - a udev rule granting `uinput` group access, **or**
-  - run with `sudo` for testing.
+- Read access to `/dev/input/eventX` and read/write access to `/dev/uinput`. Both `makepkg -si` and `deploy/install.sh` install [deploy/udev/99-loginext.rules](./deploy/udev/99-loginext.rules) for you, which grants the active session user ACL access via `TAG+="uaccess"` and falls back to `GROUP="input"` for non-logind setups. **No `sudo` for the daemon** — see the "Run unprivileged" section below for why and what to do if you see `permission denied`.
 
 For the UI: Node 20+ and a recent Rust toolchain (Tauri 2.x).
 
@@ -150,7 +147,8 @@ Default path: `$XDG_CONFIG_HOME/loginext/config.json` (falls back to `~/.config/
 ```jsonc
 {
     "sensitivity": "medium",   // "low" | "medium" | "high"
-    "invert_hwheel": true      // true is recommended for the MX Master 3S
+    "invert_hwheel": true,     // true is recommended for the MX Master 3S
+    "active_preset": "tab_nav" // "tab_nav" | "zoom" | "none" (passthrough)
 }
 ```
 
@@ -170,6 +168,8 @@ gimp=zoom
 ```
 
 App ids are case-insensitive — they're the X11 `WM_CLASS` (instance name preferred) or the Hyprland window class. The daemon hashes them at load time so the hot path only ever runs an integer compare against an atomic published by the active-window listener thread. If no rule matches, the global `active_preset` from `config.json` applies.
+
+**UI workflow:** The UI manages rules through a context-aware preset selector. When you click the Thumb Wheel control, a context bar appears with a "Global" button and per-app buttons (one for each app that has a rule). Select a context, then click a preset in the "Available Presets" list to bind it. Clicking an already-active preset deselects it — for an app context this removes the rule; for the global context this sets `active_preset` to `"none"` (raw passthrough, the thumb wheel emits unprocessed HWHEEL events).
 
 A reference file with common bindings lives at [config/app_rules.example.txt](./config/app_rules.example.txt). Reload after editing with `pkill -HUP loginext` (or any UI action that triggers a reload).
 
@@ -220,6 +220,39 @@ pkill -HUP loginext     # in-place config reload — preserves the daemon
 pkill loginext          # full restart — UI will respawn it on next ping
 ```
 
+The UI's DAEMON ONLINE/OFFLINE button drives the same lifecycle through IPC: clicking OFFLINE sends a `quit` command over the listener socket (the daemon flips its stop flag and unwinds cleanly). The cooperative path means the toggle works even when the daemon was started under a different uid (e.g. `sudo loginext`) — kill(2) EPERMs across uid boundaries, the UDS does not. If the IPC round-trip fails the UI falls back to SIGTERM → SIGKILL on the daemon's PID; you only see the EPERM error toast if both paths fail.
+
+### Run unprivileged (the supported path)
+
+The daemon is designed to run as your normal session user — **not** as root. Both pacman (`makepkg -si`) and `deploy/install.sh` install [deploy/udev/99-loginext.rules](./deploy/udev/99-loginext.rules), which:
+
+- tags `/dev/uinput` and the MX Master 3S event nodes (`046d:b034`, `046d:c548`) with `TAG+="uaccess"` so systemd-logind ACL-grants access to whoever is currently logged in on the local seat, **and**
+- as a parallel layer, sets `GROUP="input"` `MODE="0660"` so traditional input-group memberships still work on hosts without logind.
+
+After install both paths run `udevadm control --reload-rules && udevadm trigger`, so the rules apply to already-plugged-in receivers without a reboot. If you ever see "permission denied on /dev/input/eventN", **replug the Bolt receiver once** (the easiest way to make logind reapply its uaccess ACL) and you're done.
+
+**Do not use `sudo loginext`.** It's not a supported runtime: the user session's D-Bus broker rejects connections from uid 0 with `EPIPE` during the EXTERNAL auth handshake, so the KWin focus bridge can't bind and per-app rules silently fall back to the global preset. The daemon's listener will log a warning pointing you back here if it detects this.
+
+The IPC `quit` command remains a useful escape hatch even in the unprivileged flow — the UI's DAEMON OFFLINE button uses it preferentially over `kill(2)` so the lifecycle is uid-agnostic.
+
+### Tauri UI on Plasma 6 Wayland (WebKit Error 71)
+
+Some Wayland compositors — Plasma 6 + WebKitGTK 6 in particular — trip a wl_surface protocol error on the default DMA-BUF renderer:
+
+```
+Gdk-Message: Error 71 (Protocol error) dispatching to Wayland display.
+```
+
+The UI now sets `WEBKIT_DISABLE_DMABUF_RENDERER=1` (and `WEBKIT_DISABLE_COMPOSITING_MODE=1` on Wayland) at the very top of `run()`, before any GTK init runs. Both are set conditionally — if you already exported the env var in a `.desktop` file or your shell, the binary leaves it alone. The PKGBUILD's installed `loginext.desktop` keeps the explicit `env WEBKIT_DISABLE_DMABUF_RENDERER=1` prefix as belt-and-braces, but it's no longer load-bearing for the binary itself.
+
+If you still see Error 71 after this (rare — typically Nvidia + Mesa version mismatch), force the XWayland fallback explicitly:
+
+```bash
+GDK_BACKEND=x11 ./loginext-ui
+```
+
+This is a heavier hammer (the entire UI runs through XWayland and loses native Wayland niceties) but resolves every renderer-incompatibility issue we have seen in the wild.
+
 ### Find the socket and verify it's alive
 
 ```bash
@@ -227,6 +260,8 @@ echo "$XDG_RUNTIME_DIR/loginext.sock"
 nc -U "$XDG_RUNTIME_DIR/loginext.sock" <<< '{"cmd":"ping"}'
 # expected: {"ok":true,"v":1}
 ```
+
+Other one-shot probes through the same socket: `'{"cmd":"get_active_app"}'` reports the focused window as the listener saw it (useful when a per-app rule is misbehaving — the `name` field is the exact key to put in `app_rules.txt`); `'{"cmd":"quit"}'` asks the daemon to shut down gracefully.
 
 ### UI / Daemon lifecycle (what to expect)
 

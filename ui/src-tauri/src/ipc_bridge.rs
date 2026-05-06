@@ -68,13 +68,13 @@ pub fn request(mut line: String) -> String {
 
 /// Write `~/.config/loginext/config.json` with the given settings.
 /// Creates the parent directory if it does not exist.
-pub fn write_config(sensitivity: &str, invert_hwheel: bool) -> Result<(), String> {
+pub fn write_config(sensitivity: &str, invert_hwheel: bool, active_preset: &str) -> Result<(), String> {
     let dir = config_dir();
     std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {e}"))?;
 
     let path = dir.join("config.json");
     let body = format!(
-        "{{\n    \"sensitivity\": \"{sensitivity}\",\n    \"invert_hwheel\": {invert_hwheel}\n}}\n"
+        "{{\n    \"sensitivity\": \"{sensitivity}\",\n    \"invert_hwheel\": {invert_hwheel},\n    \"active_preset\": \"{active_preset}\"\n}}\n"
     );
 
     std::fs::write(&path, body).map_err(|e| format!("write({}): {e}", path.display()))

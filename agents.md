@@ -29,7 +29,11 @@ Concise rules for AI agents touching this repo. For project scope see [progress.
 
 ## Active focus — UI/UX agent
 
-Intent-based daemon state management. The Tauri shell still auto-spawns on launch (lifecycle stays unchanged), but the front-end now owns the sticky **user intent**: a `daemon_forced_off` flag in `localStorage` is set by the SYSTEM OFFLINE click and consumed on every boot to immediately countermand the auto-spawn via `kill_daemon`. The heartbeat respects intent — no auto-respawn while OFF, only a gentle 10 s probe so an externally-started daemon (systemd, CLI) still flips the button back. When adding new lifecycle controls, route them through this same intent → IPC → button-class pipeline; never sneak an auto-spawn around the flag.
+Intent-based daemon state management. The Tauri shell still auto-spawns on launch (lifecycle stays unchanged), but the front-end now owns the sticky **user intent**: a `daemon_forced_off` flag in `localStorage` is set by the DAEMON OFFLINE click and consumed on every boot to immediately countermand the auto-spawn via `kill_daemon`. The heartbeat respects intent — no auto-respawn while OFF, only a gentle 10 s probe so an externally-started daemon (systemd, CLI) still flips the button back. When adding new lifecycle controls, route them through this same intent → IPC → button-class pipeline; never sneak an auto-spawn around the flag.
+
+**Cross-uid lifecycle.** Stopping the daemon goes through IPC `quit` *before* `kill(2)`. The reason: when the daemon is launched as a different uid than the UI (e.g. `sudo loginext`), kill(2) returns EPERM, but the listener UDS was already chowned to the invoking user during init — the IPC round-trip works regardless of process ownership. If you add another lifecycle command (suspend, force-reload, etc.) prefer the same IPC-first / signal-fallback pattern; kill(2) should be reserved for genuinely wedged daemons that ignored their cooperative-shutdown ack.
+
+**Context-aware preset management.** The UI tracks a `currentContext: { type: "global" } | { type: "app", app: string }`. The context selector bar (below the Thumb Wheel) lets the user switch between the global scope and per-app scopes. The "Available Presets" list dynamically highlights whichever preset is active for the selected context. Click-to-bind sets a preset; click-to-deselect removes the binding. For the global context, deselection sets `active_preset` to `"none"` in `config.json` — the daemon interprets this as `PresetId::None` and forwards HWHEEL events as raw passthrough (no heuristics, no key combos). For per-app contexts, deselection deletes the rule from `app_rules.txt` and the app icon disappears from the context bar. The old "Defined rules" list is removed — all rule management flows through the preset list.
 
 ## Layout
 
@@ -62,6 +66,10 @@ deploy/
 
 - **Logitech MX Master 3S** — Bolt receiver `046d:b034` or USB `046d:c548`.
 - Thumb wheel → `REL_HWHEEL`. Other controls land in Phase 3.
+
+## Runtime privilege model
+
+The daemon **runs as the seat user, never as root**. Both the PKGBUILD (`deploy/loginext-git.install` post-hook) and `deploy/install.sh` install [deploy/udev/99-loginext.rules](./deploy/udev/99-loginext.rules) which grants `TAG+="uaccess"` (logind ACL) + `GROUP="input"` access to `/dev/uinput` and the MX Master 3S event nodes. Trying to run via `sudo` is a non-supported path: the user session bus broker rejects EXTERNAL auth from uid 0 with EPIPE, so the KWin focus bridge cannot bind and per-app rules silently degrade. When adding a new device-id to the supported set, extend the udev rules in lockstep — a daemon that requires sudo for new hardware is a regression.
 
 ## Process model (read before touching lifecycle code)
 

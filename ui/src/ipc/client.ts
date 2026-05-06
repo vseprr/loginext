@@ -98,10 +98,12 @@ export async function request(cmd: string, extra: Record<string, unknown> = {}):
 export async function applySettings(
   sensitivity: "low" | "medium" | "high",
   invertHwheel: boolean,
+  activePreset: string,
 ): Promise<IpcResult> {
   await invoke("write_config", {
     sensitivity,
     invertHwheel,
+    activePreset,
   });
   return request("reload");
 }

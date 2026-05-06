@@ -129,7 +129,7 @@ size_t json_escape_into(char* dst, size_t dst_cap, const char* src) noexcept {
         if (c == '"' || c == '\\') {
             dst[out++] = '\\';
             dst[out++] = static_cast<char>(c);
-        } else if (c >= 0x20 && c < 0x7f) {
+        } else if (c >= 0x20) {
             dst[out++] = static_cast<char>(c);
         }
     }
@@ -214,6 +214,15 @@ int dispatch_with_fd(const char* line, size_t len,
     if (cmd == "list_presets")   return handle_list_presets(resp, resp_cap, *dc->settings);
     if (cmd == "reload")         return handle_reload(dc, client_fd);
     if (cmd == "get_active_app") return handle_get_active_app(resp, resp_cap, dc);
+    if (cmd == "quit") {
+        // Set the same flag SIGTERM raises so the event loop's tail runs
+        // exactly the same teardown path. Reply *before* the loop notices
+        // the flag — the client (UI) can then poll the socket and observe
+        // the close as the "graceful stop" signal.
+        if (dc->stop_flag) *dc->stop_flag = 1;
+        int n = std::snprintf(resp, resp_cap, "{\"ok\":true,\"state\":\"stopping\"}");
+        return (n > 0 && static_cast<size_t>(n) < resp_cap) ? n : -1;
+    }
 
     return write_err(resp, resp_cap, "unknown_command");
 }

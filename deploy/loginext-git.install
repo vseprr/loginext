@@ -1,0 +1,57 @@
+# pacman .install hook — refreshes udev rules so the daemon can run
+# unprivileged immediately after install / upgrade, without requiring the
+# user to replug the receiver or reboot.
+#
+# Why both control --reload-rules AND trigger:
+#   --reload-rules tells udevd to reread /usr/lib/udev/rules.d/99-loginext.rules
+#   --trigger replays "add" events for the matching subsystems so the rule's
+#               TAG+="uaccess" / GROUP="input" / MODE="0660" actually take
+#               effect on already-plugged-in devices (otherwise the perms
+#               only update on the next physical reattach).
+
+post_install() {
+    refresh_udev
+    print_post_install_hint
+}
+
+post_upgrade() {
+    refresh_udev
+}
+
+post_remove() {
+    # Rules file is gone at this point; just drop the in-kernel state so
+    # leftover ACLs / group ownerships don't survive the uninstall.
+    udevadm control --reload-rules >/dev/null 2>&1 || true
+    udevadm trigger --subsystem-match=input --subsystem-match=misc >/dev/null 2>&1 || true
+}
+
+refresh_udev() {
+    udevadm control --reload-rules >/dev/null 2>&1 || \
+        echo "==> warning: udevadm control --reload-rules failed; replug the receiver after install."
+    # input → covers /dev/input/eventN. misc → covers /dev/uinput.
+    udevadm trigger --subsystem-match=input --subsystem-match=misc >/dev/null 2>&1 || true
+}
+
+print_post_install_hint() {
+    cat <<'EOF'
+==>
+==> LogiNext installed.
+==>
+==> Run as your normal user (no sudo):  loginext-ui
+==> The daemon spawns automatically on first launch.
+==>
+==> If the daemon reports "permission denied" on /dev/input/eventN:
+==>   • Re-plug the Bolt receiver (so the new udev rules apply), or
+==>   • Run `udevadm trigger --subsystem-match=input` as root, or
+==>   • Log out and back in (so logind's uaccess tag is re-applied).
+==>
+==> KDE PLASMA USERS — enable the focus-bridge KWin script (one-time, per user):
+==>   kwriteconfig6 --file kwinrc --group Plugins --key loginext-focusEnabled true
+==>   qdbus6 org.kde.KWin /KWin reconfigure
+==> Or via System Settings → Window Management → KWin Scripts → "LogiNext Focus
+==> Bridge". Without this, per-app rules cannot fire — the daemon will log a
+==> WARN line "30s elapsed since kwin-dbus bind, ZERO Activated() calls"
+==> after the first 30 seconds of any session that's missing the enablement.
+==>
+EOF
+}

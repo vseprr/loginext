@@ -60,24 +60,30 @@ void on_event(const input_event& ev, void* ctx) {
 
     if (ev.type == EV_REL && ev.code == REL_HWHEEL) {
 
+        // Per-app scope: resolve the effective preset BEFORE running
+        // heuristics so we can short-circuit to raw passthrough when the
+        // preset is None (unbound).
+        uint32_t app_hash = app->scope.active_app_hash.load(
+            std::memory_order_relaxed);
+        loginext::presets::PresetId effective = app->settings.active_preset;
+        loginext::presets::PresetId override_id;
+        if (loginext::scope::lookup(app->rules, app_hash, override_id)) {
+            effective = override_id;
+        }
+
+        // Passthrough: no preset bound → forward raw HWHEEL as-is so
+        // the wheel behaves as a normal unmapped input device.
+        if (effective == loginext::presets::PresetId::None) {
+            loginext::core::emit_passthrough(app->emitter, ev);
+            return;
+        }
+
         loginext::heuristics::tick_leak(app->scroll, ts, app->settings.profile);
 
         int32_t value = app->settings.invert_hwheel ? -ev.value : ev.value;
         auto dir = loginext::heuristics::process_hwheel(app->scroll, value, ts,
                                                         app->settings.profile);
         if (dir != loginext::heuristics::Direction::None) {
-            // Per-app scope: the listener thread publishes the focused app's
-            // FNV-1a hash into an atomic. Hot path reads it as one relaxed
-            // load + one O(1) hash-table probe; on miss (or on hash==0,
-            // i.e. "no specific app") we keep the global preset. Most
-            // specific match wins, exactly one branch off the cold path.
-            uint32_t app_hash = app->scope.active_app_hash.load(
-                std::memory_order_relaxed);
-            loginext::presets::PresetId effective = app->settings.active_preset;
-            loginext::presets::PresetId override_id;
-            if (loginext::scope::lookup(app->rules, app_hash, override_id)) {
-                effective = override_id;
-            }
             // Resolve the logical tick under the effective preset. The
             // heuristic engine never sees this dispatch; the preset table is
             // constexpr and the lookup is a single switch.
@@ -114,9 +120,10 @@ void on_reload(void* ctx) {
     auto* app = static_cast<AppContext*>(ctx);
     bool ok = loginext::config::load_settings(app->config_path, app->settings);
     if (ok) {
-        LX_INFO("config reloaded: mode=%s invert=%s",
+        LX_INFO("config reloaded: mode=%s invert=%s active_preset=%s",
                 loginext::config::mode_name(app->settings.mode),
-                app->settings.invert_hwheel ? "true" : "false");
+                app->settings.invert_hwheel ? "true" : "false",
+                loginext::presets::preset_id_str(app->settings.active_preset));
     } else {
         LX_WARN("SIGHUP received but no config changes applied");
     }
@@ -180,9 +187,10 @@ int main(int argc, char* argv[]) {
     if (cli.cli_invert_set) app.settings.invert_hwheel = cli.invert_hwheel;
     loginext::config::apply_mode(app.settings);
 
-    LX_INFO("config: mode=%s invert=%s path=%s",
+    LX_INFO("config: mode=%s invert=%s active_preset=%s path=%s",
             loginext::config::mode_name(app.settings.mode),
             app.settings.invert_hwheel ? "true" : "false",
+            loginext::presets::preset_id_str(app.settings.active_preset),
             app.config_path.empty() ? "(none)" : app.config_path.c_str());
     if (loginext::util::log_file_path()[0] != '\0') {
         LX_INFO("log: %s", loginext::util::log_file_path());
@@ -255,7 +263,8 @@ int main(int argc, char* argv[]) {
     // IPC bring-up. A failure here is non-fatal: the daemon still does its
     // primary job (tab switching) even if the UI channel is dead.
     app.epoll_fd = loop.epoll_fd;
-    app.ipc_ctx  = { &app.settings, &g_reload, -1, &app.scope, &app.rules };
+    app.ipc_ctx  = { &app.settings, &g_reload, -1, &app.scope, &app.rules,
+                     &g_stop };
 
     if (loginext::ipc::init_server(app.ipc) == 0) {
         epoll_event ev{};

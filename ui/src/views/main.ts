@@ -3,22 +3,25 @@ import { segmented } from "../components/segmented";
 import { toggle } from "../components/toggle";
 import { ipc, type SettingsResponse, type DevicesResponse,
          type ControlsResponse, type PresetsResponse,
-         type Preset } from "../ipc/client";
-import { rulesCard } from "./rules";
+         type Preset, type AppRule } from "../ipc/client";
+import { rulesCard, getRules, getPresets, onRulesChange,
+         addRule as rulesAddRule, updateRule as rulesUpdateRule,
+         deleteRule as rulesDeleteRule, getActiveApp } from "./rules";
 
 type Mode = "low" | "medium" | "high";
 
-// Current state — mutated by IPC fetch and user actions.
-// Sentinel `null` until the first daemon round-trip completes — keeps the
-// segmented control unselected during the initial paint so the user never
-// sees a wrong highlight flash to the right one.
+// Current state
 let currentMode: Mode | null = null;
 let currentInvert: boolean | null = null;
+let currentActivePreset: string | null = null;
 let applying = false;
-// Cached last-applied tuple — avoids a redundant write+reload when the user
-// clicks the already-active mode after state sync.
 let lastAppliedMode: Mode | null = null;
 let lastAppliedInvert: boolean | null = null;
+let lastAppliedPreset: string | null = null;
+
+// Context: "global" or a specific app name
+type Context = { type: "global" } | { type: "app"; app: string };
+let currentContext: Context = { type: "global" };
 
 // ── SVG icons (inline, no external deps) ──────────────────────────
 
@@ -28,13 +31,18 @@ const wheelSvg = `<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path 
 
 const tabSvg = `<svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="3"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="9" y1="3" x2="9" y2="9"/></svg>`;
 
+const zoomSvg = `<svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><line x1="16.5" y1="16.5" x2="21" y2="21"/><line x1="8" y1="11" x2="14" y2="11"/><line x1="11" y1="8" x2="11" y2="14"/></svg>`;
+
+const globalSvg = `<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>`;
+
+const appSvg = `<svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>`;
+
+function presetIcon(presetId: string): string {
+  if (presetId === "zoom") return zoomSvg;
+  return tabSvg;
+}
+
 // ── Fatal-state overlay ───────────────────────────────────────────
-//
-// Renders a centered, non-blocking banner when the daemon-side spawn check
-// reports a hard failure (binary_not_found / spawn_failed / timeout). These
-// are states the user must act on — installing the daemon, fixing perms.
-// Transient `unreachable` from a momentary daemon hiccup keeps using the
-// status bar so we don't yell at the user for a 200 ms blip.
 
 let overlayEl: HTMLElement | null = null;
 
@@ -99,7 +107,6 @@ function applyDaemonStatus(status: { ok: boolean; state: string; err?: string })
       );
       break;
     default:
-      // Unknown non-ok states fall through to the status-bar message.
       hideFatalOverlay();
   }
 }
@@ -127,20 +134,20 @@ function showToast(message: string, type: "success" | "error" = "success") {
 
 async function applyCurrentSettings() {
   if (applying) return;
-  // If the user interacted before the initial fetch completed, fall back to
-  // the daemon's documented defaults for the side they didn't touch. Avoids
-  // dropping the click without risking a wrong-value write.
   const mode   = currentMode   ?? "medium";
   const invert = currentInvert ?? true;
-  if (mode === lastAppliedMode && invert === lastAppliedInvert) return;
+  const preset = currentActivePreset ?? "tab_nav";
+  if (mode === lastAppliedMode && invert === lastAppliedInvert && preset === lastAppliedPreset) return;
   applying = true;
   try {
-    const result = await ipc.applySettings(mode, invert);
+    const result = await ipc.applySettings(mode, invert, preset);
     if (result.ok) {
       currentMode       = mode;
       currentInvert     = invert;
+      currentActivePreset = preset;
       lastAppliedMode   = mode;
       lastAppliedInvert = invert;
+      lastAppliedPreset = preset;
       showToast("Settings applied ✓", "success");
     } else {
       showToast(`Reload failed: ${result.err}`, "error");
@@ -160,7 +167,6 @@ export function renderMain(root: HTMLElement): void {
   root.appendChild(controlColumn());
   root.appendChild(presetColumn());
 
-  // Fetch initial state from daemon and sync controls
   void fetchInitialState();
 }
 
@@ -171,33 +177,18 @@ async function fetchInitialState() {
       const s = res as SettingsResponse;
       currentMode = s.mode;
       currentInvert = s.invert_hwheel;
-      // Treat the fetched state as the last-applied baseline so a click on
-      // the already-active segment is a no-op rather than a redundant IPC.
+      currentActivePreset = s.active_preset;
       lastAppliedMode = currentMode;
       lastAppliedInvert = currentInvert;
-      // Sync the UI controls (DOM is the source of truth for both widgets).
+      lastAppliedPreset = currentActivePreset;
       syncSegmented(currentMode);
       syncToggle(currentInvert);
-      // Resolve the active preset's display name from `list_presets` so the
-      // right-column header reflects whatever the daemon has bound. The
-      // current shipping value is "tab_nav" but the header is no longer
-      // hardcoded to it.
-      void syncPresetHeader(s.active_preset);
+      updatePresetHeader();
+      refreshPresetListHighlight();
     }
   } catch {
-    // Daemon may not be running — controls keep defaults
+    // Daemon may not be running
   }
-}
-
-async function syncPresetHeader(activeId: string): Promise<void> {
-  if (!presetHeaderNameEl) return;
-  try {
-    const res = await ipc.listPresets();
-    if (!res.ok) return;
-    const data = res as PresetsResponse;
-    const match = data.presets.find((p) => p.id === activeId);
-    if (match) presetHeaderNameEl.textContent = match.name;
-  } catch { /* keep the placeholder text — heartbeat will handle offline */ }
 }
 
 // ── Device column (left) ──────────────────────────────────────────
@@ -211,7 +202,6 @@ function deviceColumn(): HTMLElement {
   const list = document.createElement("div");
   list.id = "device-list";
 
-  // Skeleton while loading
   const skel = document.createElement("div");
   skel.className = "skeleton";
   skel.style.width = "80%";
@@ -221,7 +211,6 @@ function deviceColumn(): HTMLElement {
   c.appendChild(list);
   col.appendChild(c);
 
-  // Fetch real data
   void (async () => {
     try {
       const res = await ipc.listDevices();
@@ -271,6 +260,9 @@ function deviceItem(name: string, id: string, selected: boolean): HTMLElement {
 
 // ── Control column (middle) ───────────────────────────────────────
 
+let contextBarEl: HTMLElement | null = null;
+let presetListEl: HTMLElement | null = null;
+
 function controlColumn(): HTMLElement {
   const col = document.createElement("div");
   col.className = "app__col";
@@ -286,7 +278,6 @@ function controlColumn(): HTMLElement {
   c.appendChild(list);
   col.appendChild(c);
 
-  // Fetch controls
   void (async () => {
     try {
       const res = await ipc.listControls();
@@ -301,74 +292,210 @@ function controlColumn(): HTMLElement {
       list.innerHTML = "";
       list.appendChild(controlItem("Thumb Wheel", "Horizontal wheel", true));
     }
+    // After controls render, create the context bar
+    contextBarEl = document.createElement("div");
+    contextBarEl.className = "context-selector";
+    contextBarEl.id = "context-selector";
+    list.appendChild(contextBarEl);
+    renderContextBar();
   })();
 
   // Preset list card
   const presetCard = card({ title: "Available Presets" });
-  const presetList = document.createElement("div");
-  presetList.id = "preset-list";
+  presetListEl = document.createElement("div");
+  presetListEl.id = "preset-list";
 
-  presetCard.appendChild(presetList);
+  presetCard.appendChild(presetListEl);
   col.appendChild(presetCard);
 
-  // Preset list is now driven entirely by the daemon's `list_presets`. The
-  // active row is whichever id the daemon reports under `active`. Phase 2.4
-  // renders this read-only; the click-to-switch wiring lands when a second
-  // preset is shipped — until then the segmented Low/Medium/High control
-  // remains the only interactive element on the panel and is unaffected.
-  void renderPresetList(presetList);
+  void renderPresetList();
 
-  // Per-app rules (Phase 2.5 UI). The card pulls its own data over IPC,
-  // owns the file-roundtrip lifecycle, and uses the page's existing toast
-  // helper for save/error surfacing — keeps the rules module decoupled
-  // from the rest of main.ts.
+  // Per-app rules card (keeps "Currently focused" + "+ Add rule")
   col.appendChild(rulesCard(showToast));
+
+  // Listen for rule mutations from the rules module
+  onRulesChange((_rules: AppRule[]) => {
+    renderContextBar();
+    refreshPresetListHighlight();
+  });
 
   return col;
 }
 
-async function renderPresetList(presetList: HTMLElement): Promise<void> {
+// ── Context selector bar ─────────────────────────────────────────
+
+function renderContextBar(): void {
+  if (!contextBarEl) return;
+  contextBarEl.innerHTML = "";
+
+  const rules = getRules();
+
+  // Global button
+  const globalBtn = document.createElement("button");
+  globalBtn.type = "button";
+  globalBtn.className = "context-btn" +
+    (currentContext.type === "global" ? " context-btn--active" : "");
+  globalBtn.id = "ctx-global";
+  globalBtn.title = "Global (all apps)";
+  const globalIcon = document.createElement("span");
+  globalIcon.className = "context-btn__icon";
+  globalIcon.innerHTML = globalSvg;
+  const globalLabel = document.createElement("span");
+  globalLabel.className = "context-btn__label";
+  globalLabel.textContent = "Global";
+  globalBtn.appendChild(globalIcon);
+  globalBtn.appendChild(globalLabel);
+  globalBtn.addEventListener("click", () => {
+    currentContext = { type: "global" };
+    renderContextBar();
+    refreshPresetListHighlight();
+    updatePresetHeader();
+  });
+  contextBarEl.appendChild(globalBtn);
+
+  // Per-app buttons for each rule
+  for (const r of rules) {
+    const appBtn = document.createElement("button");
+    appBtn.type = "button";
+    appBtn.className = "context-btn" +
+      (currentContext.type === "app" && currentContext.app === r.app ? " context-btn--active" : "");
+    appBtn.title = r.app;
+    const appIcon = document.createElement("span");
+    appIcon.className = "context-btn__icon";
+    appIcon.innerHTML = appSvg;
+    const appLabel = document.createElement("span");
+    appLabel.className = "context-btn__label";
+    appLabel.textContent = r.app;
+    appBtn.appendChild(appIcon);
+    appBtn.appendChild(appLabel);
+    appBtn.addEventListener("click", () => {
+      currentContext = { type: "app", app: r.app };
+      renderContextBar();
+      refreshPresetListHighlight();
+      updatePresetHeader();
+    });
+    contextBarEl.appendChild(appBtn);
+  }
+}
+
+// ── Preset list ──────────────────────────────────────────────────
+
+async function renderPresetList(): Promise<void> {
+  if (!presetListEl) return;
   let presets: Preset[] = [];
-  let active: string | null = null;
   try {
     const res = await ipc.listPresets();
     if (res.ok) {
       const data = res as PresetsResponse;
       presets = data.presets;
-      active = data.active ?? null;
     }
   } catch {
-    // Daemon down — fall back to a single placeholder so the column doesn't
-    // collapse. The heartbeat owns the user-visible "offline" signal.
     presets = [{ id: "tab_nav", name: "Navigate between tabs" }];
-    active = "tab_nav";
   }
 
-  presetList.innerHTML = "";
+  presetListEl.innerHTML = "";
   for (const p of presets) {
-    const isActive = active != null ? p.id === active : presets.length === 1;
-    presetList.appendChild(presetListItem(p, isActive));
+    presetListEl.appendChild(presetListItem(p));
+  }
+  refreshPresetListHighlight();
+}
+
+function getActivePresetForContext(): string | null {
+  if (currentContext.type === "global") {
+    return currentActivePreset;
+  }
+  const ctx = currentContext;
+  const rules = getRules();
+  const rule = rules.find(
+    (r) => r.app.toLowerCase() === ctx.app.toLowerCase()
+  );
+  return rule ? rule.preset : null;
+}
+
+function refreshPresetListHighlight(): void {
+  if (!presetListEl) return;
+  const activeId = getActivePresetForContext();
+  for (const child of Array.from(presetListEl.children)) {
+    const el = child as HTMLElement;
+    const id = el.dataset.presetId;
+    const isActive = id != null && activeId != null && id === activeId;
+    el.setAttribute("aria-selected", String(isActive));
+    const icon = el.querySelector(".icon-circle");
+    if (icon) {
+      if (isActive) icon.classList.add("icon-circle--active");
+      else icon.classList.remove("icon-circle--active");
+    }
   }
 }
 
-function presetListItem(p: Preset, isActive: boolean): HTMLElement {
+function presetListItem(p: Preset): HTMLElement {
   const item = document.createElement("div");
   item.className = "list-item";
-  item.setAttribute("aria-selected", String(isActive));
+  item.setAttribute("aria-selected", "false");
   item.id = `preset-${p.id}`;
   item.dataset.presetId = p.id;
 
   const icon = document.createElement("div");
-  icon.className =
-    "icon-circle icon-circle--sm" + (isActive ? " icon-circle--active" : "");
-  icon.innerHTML = tabSvg;
+  icon.className = "icon-circle icon-circle--sm";
+  icon.innerHTML = presetIcon(p.id);
 
   const label = document.createElement("span");
   label.textContent = p.name;
 
   item.appendChild(icon);
   item.appendChild(label);
+
+  // Click handler: bind/unbind
+  item.addEventListener("click", () => {
+    void handlePresetClick(p);
+  });
+
   return item;
+}
+
+async function handlePresetClick(p: Preset): Promise<void> {
+  const activeId = getActivePresetForContext();
+
+  if (currentContext.type === "global") {
+    if (activeId === p.id) {
+      // Deselect: unbind global → passthrough (none)
+      currentActivePreset = "none";
+      void applyCurrentSettings();
+    } else {
+      // Select: bind global to this preset
+      currentActivePreset = p.id;
+      void applyCurrentSettings();
+    }
+    refreshPresetListHighlight();
+    updatePresetHeader();
+  } else {
+    // App context
+    const appName = currentContext.app;
+    if (activeId === p.id) {
+      // Deselect: remove the per-app rule entirely
+      rulesDeleteRule(appName);
+      // If no rules left for this app, switch back to global context
+      const remaining = getRules().find(
+        (r) => r.app.toLowerCase() === appName.toLowerCase()
+      );
+      if (!remaining) {
+        currentContext = { type: "global" };
+        renderContextBar();
+      }
+    } else {
+      // Select: create or update per-app rule
+      const existing = getRules().find(
+        (r) => r.app.toLowerCase() === appName.toLowerCase()
+      );
+      if (existing) {
+        rulesUpdateRule(appName, p.id);
+      } else {
+        rulesAddRule(appName, p.id);
+      }
+    }
+    refreshPresetListHighlight();
+    updatePresetHeader();
+  }
 }
 
 function controlItem(name: string, kind: string, selected: boolean): HTMLElement {
@@ -398,11 +525,12 @@ function controlItem(name: string, kind: string, selected: boolean): HTMLElement
   return el;
 }
 
-// ── Preset column (right) — Navigate Between Tabs settings ────────
+// ── Preset column (right) — settings ──────────────────────────────
 
 let segmentedEl: HTMLElement | null = null;
 let toggleEl: HTMLElement | null = null;
 let presetHeaderNameEl: HTMLElement | null = null;
+let presetHeaderIconEl: HTMLElement | null = null;
 
 function syncSegmented(mode: Mode) {
   if (!segmentedEl) return;
@@ -415,6 +543,25 @@ function syncSegmented(mode: Mode) {
 function syncToggle(checked: boolean) {
   if (!toggleEl) return;
   toggleEl.setAttribute("aria-checked", String(checked));
+}
+
+function updatePresetHeader(): void {
+  if (!presetHeaderNameEl) return;
+  const activeId = getActivePresetForContext();
+  if (!activeId || activeId === "none") {
+    presetHeaderNameEl.textContent = "No preset (passthrough)";
+    if (presetHeaderIconEl) {
+      presetHeaderIconEl.classList.remove("icon-circle--active");
+    }
+    return;
+  }
+  const presets = getPresets();
+  const match = presets.find((p) => p.id === activeId);
+  presetHeaderNameEl.textContent = match ? match.name : activeId;
+  if (presetHeaderIconEl) {
+    presetHeaderIconEl.classList.add("icon-circle--active");
+    presetHeaderIconEl.innerHTML = presetIcon(activeId);
+  }
 }
 
 function presetColumn(): HTMLElement {
@@ -431,12 +578,10 @@ function presetColumn(): HTMLElement {
   const headerIcon = document.createElement("div");
   headerIcon.className = "icon-circle icon-circle--sm icon-circle--active";
   headerIcon.innerHTML = tabSvg;
+  presetHeaderIconEl = headerIcon;
 
   const headerName = document.createElement("div");
   headerName.className = "preset-header__name";
-  // Placeholder until `fetchInitialState()` resolves the active preset's
-  // display name from the daemon. Hardcoding the string here would defeat
-  // the modular preset selection menu groundwork.
   headerName.textContent = "Navigate between tabs";
   presetHeaderNameEl = headerName;
 
@@ -449,10 +594,6 @@ function presetColumn(): HTMLElement {
   sensLabel.className = "section-label";
   sensLabel.textContent = "Sensitivity";
 
-  // No initial highlight — `value` deliberately omitted so all options paint
-  // as inactive on first frame. `fetchInitialState()` selects the right one
-  // after the first daemon round-trip; eliminates the "default flashes before
-  // correct value" flicker users used to see.
   segmentedEl = segmented<Mode>({
     options: [
       { value: "low",    label: "Low" },
@@ -481,7 +622,6 @@ function presetColumn(): HTMLElement {
   invDesc.textContent = "Reverse scroll direction";
 
   toggleEl = toggle({
-    // Same rationale as segmented above — render unchecked, sync after fetch.
     checked: false,
     onChange: (v) => {
       currentInvert = v;
@@ -500,19 +640,6 @@ function presetColumn(): HTMLElement {
 }
 
 // ── Heartbeat + status toggle ─────────────────────────────────────
-//
-// The status bar hosts a single SYSTEM ONLINE/OFFLINE button — the user
-// clicks it to take the daemon up or down. The click flips a sticky flag
-// in localStorage so the intent survives UI restarts: when the user has
-// explicitly stopped the daemon we suppress auto-respawn, otherwise the
-// heartbeat would fight the user's last action.
-//
-// Cadence (intent = ON, auto-respawn enabled):
-//   - success → 5 s
-//   - failure → 2 s, 4 s, 8 s, 16 s, 30 s (capped)
-// Cadence (intent = OFF):
-//   - 10 s gentle probe — flips the button to ONLINE if some external
-//     agent (systemd, CLI) brings the daemon up, but never respawns.
 
 const HEARTBEAT_OK_MS    = 5_000;
 const HEARTBEAT_MIN_FAIL = 2_000;
@@ -529,7 +656,7 @@ function setForcedOff(value: boolean): void {
   try {
     if (value) localStorage.setItem(FORCED_OFF_KEY, "true");
     else localStorage.removeItem(FORCED_OFF_KEY);
-  } catch { /* private mode / disabled storage — fall through */ }
+  } catch { /* private mode / disabled storage */ }
 }
 
 type ButtonState = "online" | "offline" | "pending";
@@ -561,8 +688,8 @@ function createStatusButton(): StatusButton {
       "status-toggle--pending",
     );
     btn.classList.add(`status-toggle--${s}`);
-    if (s === "online")  { label.textContent = "SYSTEM ONLINE";  btn.setAttribute("aria-pressed", "true");  }
-    if (s === "offline") { label.textContent = "SYSTEM OFFLINE"; btn.setAttribute("aria-pressed", "false"); }
+    if (s === "online")  { label.textContent = "DAEMON ONLINE";  btn.setAttribute("aria-pressed", "true");  }
+    if (s === "offline") { label.textContent = "DAEMON OFFLINE"; btn.setAttribute("aria-pressed", "false"); }
     if (s === "pending") { label.textContent = "CONNECTING…";    btn.setAttribute("aria-pressed", "false"); }
   };
 
@@ -577,16 +704,13 @@ export async function attachHeartbeat(bar: HTMLElement): Promise<void> {
 
   let failures = 0;
   let timer: ReturnType<typeof setTimeout> | null = null;
-  let busy = false; // user click in flight — beat() backs off until it clears
+  let busy = false;
 
   const schedule = (ms: number) => {
     if (timer) clearTimeout(timer);
     timer = setTimeout(beat, ms);
   };
 
-  // Honour persisted intent immediately. The Tauri shell auto-spawns the
-  // daemon before the window opens (it can't see localStorage), so if the
-  // user previously chose OFF we must take it back down on first paint.
   if (isForcedOff()) {
     status.set("offline");
     try { await ipc.daemonKill(); } catch { /* best-effort */ }
@@ -610,14 +734,11 @@ export async function attachHeartbeat(bar: HTMLElement): Promise<void> {
           failures = 0;
           schedule(HEARTBEAT_OFF_MS);
         } else {
-          // Kill failed — daemon almost certainly still up; don't lie.
           status.set("online");
           showToast(`Stop failed: ${r.err ?? r.state}`, "error");
           schedule(HEARTBEAT_OK_MS);
         }
       } else {
-        // Going online — clear intent first so the heartbeat resumes
-        // auto-respawn behaviour, then ask Tauri to spawn.
         setForcedOff(false);
         const r = await ipc.daemonRespawn();
         applyDaemonStatus(r);
@@ -627,8 +748,6 @@ export async function attachHeartbeat(bar: HTMLElement): Promise<void> {
           failures = 0;
           schedule(HEARTBEAT_OK_MS);
         } else {
-          // Spawn refused (binary missing, perms). Re-arm intent so we
-          // don't keep hammering respawn on every heartbeat.
           setForcedOff(true);
           status.set("offline");
           showToast(`Start failed: ${r.err ?? r.state}`, "error");
@@ -643,9 +762,6 @@ export async function attachHeartbeat(bar: HTMLElement): Promise<void> {
     }
   });
 
-  // First-paint spawn-outcome surfacing — same role the old text status had,
-  // but the button colour now carries the state, so we only need the overlay
-  // for hard-fails.
   if (!isForcedOff()) {
     try {
       const s = await ipc.daemonStatus();
@@ -657,8 +773,6 @@ export async function attachHeartbeat(bar: HTMLElement): Promise<void> {
     if (busy) { schedule(HEARTBEAT_MIN_FAIL); return; }
 
     if (isForcedOff()) {
-      // Intent = OFF: probe but don't respawn. If the socket has come back
-      // (systemd, manual CLI start), reflect that in the button.
       try {
         const r = await ipc.ping();
         status.set(r.ok ? "online" : "offline");
@@ -698,8 +812,6 @@ export async function attachHeartbeat(bar: HTMLElement): Promise<void> {
       } catch { /* swallow */ }
     }
 
-    // Auto-respawn exhausted — settle on OFFLINE. Avoids a perpetual
-    // pulsing "connecting" state when the binary is genuinely missing.
     if (failures > 3) status.set("offline");
 
     const backoff = Math.min(HEARTBEAT_MIN_FAIL << (failures - 1), HEARTBEAT_MAX_FAIL);

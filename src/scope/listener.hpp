@@ -35,6 +35,14 @@ struct Listener {
     std::mutex            intro_mutex;
     char                  intro_name[128]{};      // raw class / app id (rule-key candidate)
     char                  intro_source[16]{};     // "kde-wayland" / "x11" / "hyprland" / ""
+
+    // Diagnostic: set true on the first kwin-dbus Activated() call. The
+    // listener thread checks this 30s after binding the well-known name
+    // and emits a one-shot WARN if it's still false — that's the canonical
+    // signature of "the LogiNext Focus Bridge KWin script is installed
+    // but not enabled in kwinrc". Single-thread (listener-only) access,
+    // no synchronisation needed.
+    bool                  kwin_received_any = false;
 };
 
 // Start the background detector. Returns 0 on success, -1 if the thread

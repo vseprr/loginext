@@ -197,6 +197,36 @@ if [[ -d "$KWIN_SCRIPT_DIR" ]]; then
     fi
 fi
 
+# ---- 7.5 udev rules (system-wide) ------------------------------------------
+# These let the daemon run unprivileged by granting the active session user
+# ACL access to /dev/input/eventN (the MX Master 3S) and /dev/uinput. We
+# install to /etc/udev/rules.d/ rather than /usr/lib/udev/rules.d/ because
+# install.sh is a per-host operator script (not a package) — /etc is the
+# right home for admin-managed overrides, and the path takes precedence
+# over /usr/lib so a future PKGBUILD install doesn't accidentally shadow
+# an admin's customisation here.
+step "Installing udev rules (requires sudo)"
+UDEV_SRC="$REPO_ROOT/deploy/udev/99-loginext.rules"
+UDEV_DST="/etc/udev/rules.d/99-loginext.rules"
+if [[ -f "$UDEV_SRC" ]]; then
+    if sudo install -Dm0644 "$UDEV_SRC" "$UDEV_DST"; then
+        ok "$UDEV_DST"
+        # Reload + trigger so the rules apply immediately, no replug needed.
+        # `input` subsystem covers /dev/input/event*; `misc` covers /dev/uinput.
+        # Both are best-effort: a CI / chroot install with no live udevd
+        # will fail these silently, and the rules apply on next boot anyway.
+        sudo udevadm control --reload-rules >/dev/null 2>&1 || \
+            warn "udevadm reload-rules failed — replug the receiver to pick up the rule manually."
+        sudo udevadm trigger --subsystem-match=input --subsystem-match=misc \
+            >/dev/null 2>&1 || true
+        ok "udev rules reloaded"
+    else
+        warn "could not install udev rules (sudo declined?) — daemon will need 'input' group membership or sudo to run."
+    fi
+else
+    warn "$UDEV_SRC not found — skipping udev rules step"
+fi
+
 # ---- 8. systemd user unit ---------------------------------------------------
 step "Installing systemd user unit"
 mkdir -p "$SYSTEMD_USER_DIR"
@@ -223,3 +253,8 @@ printf "\n${c_green}LogiNext installed.${c_off}\n"
 echo "  • Launch from your application menu (search 'LogiNext'),"
 echo "  • or run: $UI_DST"
 echo "  • Daemon log: \$XDG_STATE_HOME/loginext/daemon.log (default ~/.local/state/loginext/daemon.log)"
+echo
+echo "  No sudo required — the udev rules grant your session user direct"
+echo "  access to the mouse and /dev/uinput. If the daemon reports"
+echo "  'permission denied' on /dev/input/event*, replug the Bolt receiver"
+echo "  once so logind re-applies its uaccess ACL."

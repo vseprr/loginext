@@ -27,6 +27,12 @@ struct DispatchCtx {
     int                               reload_pending_fd = -1;  // client fd awaiting reload ack
     loginext::scope::Listener*        scope = nullptr;
     const loginext::scope::RuleTable* rules = nullptr;
+    // Cooperative shutdown: `quit` IPC sets this so the event loop unwinds
+    // exactly the same way SIGTERM would. Lets the UI stop a daemon that
+    // was started under a different uid (sudo) — process-level kill(2)
+    // would EPERM there, but the socket round-trip works because the
+    // listener UDS is chowned to the invoking user (see ipc/server.cpp).
+    volatile sig_atomic_t*            stop_flag = nullptr;
 };
 
 // CommandHandler-compatible entry point. Parses the first "cmd" key out of

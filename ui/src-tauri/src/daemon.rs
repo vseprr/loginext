@@ -13,6 +13,7 @@
 //!   "daemon: unreachable" status bar instead of crashing.
 
 use std::io;
+use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -206,10 +207,10 @@ pub enum KillOutcome {
     Timeout,
 }
 
-/// Locate running `loginext` daemons by walking `/proc`. Compares the basename
-/// of `/proc/<pid>/exe` against `loginext` (matches both dev `build/loginext`
-/// and installed `~/.local/bin/loginext`). Skips entries we can't read — a
-/// non-root UI can't see other users' processes anyway.
+/// Locate running `loginext` daemons by walking `/proc`. Tries two methods:
+///   1. Resolve `/proc/<pid>/exe` symlink and compare basename to `loginext`.
+///   2. Fall back to reading `/proc/<pid>/comm` (world-readable, works when
+///      the daemon runs as root via sudo and /exe is unreadable by the user).
 fn find_daemon_pids() -> Vec<i32> {
     let mut out = Vec::new();
     let Ok(entries) = std::fs::read_dir("/proc") else {
@@ -219,20 +220,76 @@ fn find_daemon_pids() -> Vec<i32> {
         let name = entry.file_name();
         let Some(s) = name.to_str() else { continue };
         let Ok(pid) = s.parse::<i32>() else { continue };
+
+        // Method 1: /proc/<pid>/exe (most reliable but requires same-user)
         let exe = entry.path().join("exe");
-        let Ok(target) = std::fs::read_link(&exe) else { continue };
-        if target.file_name().and_then(|n| n.to_str()) == Some("loginext") {
-            out.push(pid);
+        if let Ok(target) = std::fs::read_link(&exe) {
+            if target.file_name().and_then(|n| n.to_str()) == Some("loginext") {
+                out.push(pid);
+                continue;
+            }
+        }
+
+        // Method 2: /proc/<pid>/comm (world-readable, 16-char truncated name)
+        let comm = entry.path().join("comm");
+        if let Ok(content) = std::fs::read_to_string(&comm) {
+            if content.trim() == "loginext" {
+                out.push(pid);
+            }
         }
     }
     out
 }
 
-/// Send SIGTERM to every running `loginext` daemon and wait for the socket
-/// to close. Escalates to SIGKILL if the daemon ignores SIGTERM past the
-/// grace window — the daemon's epoll loop catches SIGTERM via signalfd and
-/// shuts down cleanly, so in practice the escalation path is dead code we
-/// keep for the rare wedge.
+/// Ask the daemon to shut itself down via the IPC `quit` command. Returns
+/// true if the daemon answered ok and the socket subsequently went silent
+/// inside the grace window. False on any error (no socket, malformed reply,
+/// daemon ignored the request) — the caller should fall back to signals.
+///
+/// Why this exists: when the daemon was started under a different uid (e.g.
+/// `sudo loginext` for raw /dev/input access), kill(2) returns EPERM and
+/// the user is stuck. The UDS, however, is chowned to the invoking user
+/// during init (see ipc/server.cpp), so a UI running unprivileged can still
+/// reach it. Routing the stop through IPC sidesteps the uid-mismatch trap
+/// entirely.
+fn quit_via_ipc(path: &Path) -> bool {
+    let stream = match UnixStream::connect(path) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
+    let _ = stream.set_write_timeout(Some(Duration::from_millis(500)));
+
+    let mut writer = &stream;
+    if writer.write_all(b"{\"cmd\":\"quit\"}\n").is_err() {
+        return false;
+    }
+    let mut reader = BufReader::new(&stream);
+    let mut resp = String::new();
+    if reader.read_line(&mut resp).is_err() {
+        return false;
+    }
+    // Don't hard-fail on the parse — the daemon's reply schema is small and
+    // an "ok":true substring match is robust enough for a fire-and-poll
+    // shutdown. The deadline below is the real success signal.
+    if !resp.contains("\"ok\":true") {
+        return false;
+    }
+
+    let deadline = Instant::now() + KILL_GRACE;
+    while Instant::now() < deadline {
+        if !socket_alive(path) {
+            return true;
+        }
+        std::thread::sleep(KILL_POLL);
+    }
+    false
+}
+
+/// Stop every running `loginext` daemon. Tries cooperative IPC first, then
+/// SIGTERM, then SIGKILL — only the first path works when the daemon was
+/// launched under a different uid (sudo), and the kernel-level signals are
+/// kept as a fallback for a wedged daemon that ignored its IPC.
 pub fn kill_daemon() -> KillOutcome {
     let path = socket_path();
     let pids = find_daemon_pids();
@@ -241,8 +298,17 @@ pub fn kill_daemon() -> KillOutcome {
         return KillOutcome::NotRunning;
     }
 
-    // No PID but the socket is still warm — something is listening that
-    // we don't own (different uid, container). Bail without lying about it.
+    // Cooperative shutdown — works regardless of who owns the daemon
+    // process, because the listener UDS has the invoking user's perms.
+    if socket_alive(&path) && quit_via_ipc(&path) {
+        let primary = pids.first().map(|&p| p as u32).unwrap_or(0);
+        eprintln!("[loginext-ui] daemon: stopped via IPC quit (pid={primary})");
+        return KillOutcome::Killed { pid: primary };
+    }
+
+    // No PID but the socket is still warm and IPC quit didn't take it down
+    // — something is listening that we genuinely cannot reach. Bail rather
+    // than lie about success.
     if pids.is_empty() {
         return KillOutcome::SignalFailed {
             reason: "socket alive but no matching loginext process found".to_string(),
@@ -251,9 +317,12 @@ pub fn kill_daemon() -> KillOutcome {
 
     let primary = pids[0] as u32;
     let mut last_err: Option<String> = None;
+    let mut any_signaled = false;
     for &pid in &pids {
         let rc = unsafe { kill(pid, SIGTERM) };
-        if rc != 0 {
+        if rc == 0 {
+            any_signaled = true;
+        } else {
             last_err = Some(format!("pid={pid}: {}", io::Error::last_os_error()));
         }
     }
@@ -261,33 +330,52 @@ pub fn kill_daemon() -> KillOutcome {
     // Poll the socket — once the daemon's epoll loop exits and the listener
     // is dropped, connect() starts refusing. Cheaper and more reliable than
     // waitpid(), which wouldn't work anyway since we're not the parent.
-    let deadline = Instant::now() + KILL_GRACE;
-    while Instant::now() < deadline {
-        if !socket_alive(&path) {
-            eprintln!("[loginext-ui] daemon: terminated pid={primary}");
-            return KillOutcome::Killed { pid: primary };
+    if any_signaled {
+        let deadline = Instant::now() + KILL_GRACE;
+        while Instant::now() < deadline {
+            if !socket_alive(&path) {
+                eprintln!("[loginext-ui] daemon: terminated pid={primary}");
+                return KillOutcome::Killed { pid: primary };
+            }
+            std::thread::sleep(KILL_POLL);
         }
-        std::thread::sleep(KILL_POLL);
     }
 
-    // Daemon stuck — escalate. SIGKILL is uncatchable, so if this also fails
-    // it's almost certainly a permission issue.
+    // Daemon stuck or SIGTERM was rejected (cross-uid) — escalate to
+    // SIGKILL. If this also EPERMs, surface a clean message instead of the
+    // raw errno: the user needs to know it's a permissions problem so they
+    // can stop the daemon manually (or run the UI as the same uid).
+    let mut any_killed = false;
     for &pid in &pids {
         let rc = unsafe { kill(pid, SIGKILL) };
-        if rc != 0 {
+        if rc == 0 {
+            any_killed = true;
+        } else {
             last_err = Some(format!("pid={pid} SIGKILL: {}", io::Error::last_os_error()));
         }
     }
-    let kill_deadline = Instant::now() + KILL_GRACE;
-    while Instant::now() < kill_deadline {
-        if !socket_alive(&path) {
-            eprintln!("[loginext-ui] daemon: SIGKILL'd pid={primary}");
-            return KillOutcome::Killed { pid: primary };
+    if any_killed {
+        let kill_deadline = Instant::now() + KILL_GRACE;
+        while Instant::now() < kill_deadline {
+            if !socket_alive(&path) {
+                eprintln!("[loginext-ui] daemon: SIGKILL'd pid={primary}");
+                return KillOutcome::Killed { pid: primary };
+            }
+            std::thread::sleep(KILL_POLL);
         }
-        std::thread::sleep(KILL_POLL);
     }
 
     if let Some(reason) = last_err {
+        // Most common failure here is EPERM — the daemon is owned by a
+        // different uid and the IPC path also failed. Translate it once so
+        // the UI toast is actionable.
+        if reason.contains("Operation not permitted") || reason.contains("os error 1") {
+            return KillOutcome::SignalFailed {
+                reason: format!(
+                    "daemon owned by another user — start it as your user (avoid `sudo loginext`) or stop it manually. Underlying: {reason}"
+                ),
+            };
+        }
         KillOutcome::SignalFailed { reason }
     } else {
         KillOutcome::Timeout

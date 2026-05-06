@@ -1,4 +1,5 @@
 {
     "sensitivity": "medium",
-    "invert_hwheel": true
+    "invert_hwheel": true,
+    "active_preset": "tab_nav"
 }

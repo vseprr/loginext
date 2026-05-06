@@ -212,6 +212,11 @@ int kwin_on_activated(sd_bus_message* m, void* userdata,
     int rc = sd_bus_message_read(m, "ss", &resource_class, &resource_name);
     if (rc < 0) return rc;
 
+    // First call from the KWin script — flip the diagnostic flag the loop
+    // checks at the 30s mark. Single-thread access (sd_bus_process and the
+    // loop run on the same listener thread), so the plain bool is fine.
+    l->kwin_received_any = true;
+
     // KWin's resourceName matches X11's WM_CLASS instance_name (lower-cased
     // app id, e.g. "navigator" for Firefox); resourceClass matches the X11
     // class (e.g. "firefox"). Prefer resourceName for the same reasons the
@@ -238,10 +243,29 @@ const sd_bus_vtable kwin_vtable[] = {
 
 bool kwin_dbus_loop(Listener* l) noexcept {
     sd_bus* bus = nullptr;
+
+    // The supported runtime is "daemon runs as the same user as the KDE
+    // session" — guaranteed by the udev rules shipped at
+    // deploy/udev/99-loginext.rules (TAG+="uaccess" + GROUP="input" on
+    // /dev/input/event* for the MX Master 3S, plus /dev/uinput). Under
+    // that contract sd_bus_open_user() is the correct call: it picks up
+    // the user's session bus from $DBUS_SESSION_BUS_ADDRESS or
+    // $XDG_RUNTIME_DIR/bus and connects without further ceremony.
+    //
+    // We deliberately do NOT try to bridge to the user's bus when running
+    // as root. Phase 2.7.1 / 2.7.2 attempted that path and hit the dbus
+    // broker's "EXTERNAL auth from uid 0" rejection — the session bus
+    // drops the connection with EPIPE before the name claim is even
+    // issued. Recommending unprivileged execution via udev is both simpler
+    // and more secure than fighting that policy.
     int rc = sd_bus_open_user(&bus);
     if (rc < 0) {
-        LX_DEBUG("scope: sd_bus_open_user failed (%s) — kwin-dbus disabled",
-                 std::strerror(-rc));
+        LX_WARN("scope: sd_bus_open_user failed (%s) — kwin-dbus disabled. "
+                "If you started loginext via sudo, stop it and rerun as your "
+                "regular user; install the udev rules from deploy/udev/ for "
+                "unprivileged /dev/input + /dev/uinput access.",
+                std::strerror(-rc));
+        if (bus) sd_bus_unref(bus);
         return false;
     }
 
@@ -280,6 +304,19 @@ bool kwin_dbus_loop(Listener* l) noexcept {
         return false;
     }
 
+    // Diagnostic deadline: warn the user 30s after binding if the KWin
+    // script hasn't published a single Activated() event. The classic
+    // failure mode is that the script files are installed system-wide
+    // (`/usr/share/kwin/scripts/loginext-focus/`) but the per-user
+    // `kwinrc` doesn't have `loginext-focusEnabled=true` because the
+    // pacman post-install hook can't write into a user's $HOME. Without
+    // this warning the user only sees "Currently focused: (unknown)" in
+    // the UI and has no obvious next step.
+    timespec bind_ts{};
+    clock_gettime(CLOCK_MONOTONIC, &bind_ts);
+    constexpr uint64_t kwin_warn_after_us = 30'000'000ULL;
+    bool warned_no_kwin_events = false;
+
     while (!l->stop.load(std::memory_order_relaxed)) {
         // Drain everything sd-bus has queued internally before sleeping —
         // sd_bus_process() returns >0 while progress was made, 0 when the
@@ -315,15 +352,49 @@ bool kwin_dbus_loop(Listener* l) noexcept {
             break;
         }
 
+        // Resolve "now" once — used both for the diagnostic clamp below
+        // and for the sd-bus relative-deadline computation.
+        timespec now{};
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        uint64_t now_us = static_cast<uint64_t>(now.tv_sec) * 1'000'000ULL
+                        + static_cast<uint64_t>(now.tv_nsec) / 1'000ULL;
+        uint64_t bind_us = static_cast<uint64_t>(bind_ts.tv_sec) * 1'000'000ULL
+                         + static_cast<uint64_t>(bind_ts.tv_nsec) / 1'000ULL;
+
+        // Fire the one-shot warning if 30 s have passed without a single
+        // Activated() arriving from the KWin script. Phrased as a help
+        // message because it's nearly always a missing kwinrc enablement
+        // flag, not a daemon bug.
+        if (!warned_no_kwin_events && !l->kwin_received_any
+            && now_us - bind_us >= kwin_warn_after_us) {
+            LX_WARN("scope: 30s elapsed since kwin-dbus bind, ZERO Activated() "
+                    "calls received. The 'LogiNext Focus Bridge' KWin script is "
+                    "almost certainly not enabled. Fix it without leaving the "
+                    "shell:\n"
+                    "    kwriteconfig6 --file kwinrc --group Plugins "
+                    "--key loginext-focusEnabled true\n"
+                    "    qdbus6 org.kde.KWin /KWin reconfigure\n"
+                    "or via System Settings → Window Management → KWin Scripts. "
+                    "Until then, per-app rules cannot match (active_app_hash "
+                    "stays at 0 → global preset wins on every event).");
+            warned_no_kwin_events = true;
+        }
+
+        // Build the select() timeout. Two deadlines compete: sd-bus's own
+        // timer wheel and (for the duration of the diagnostic window) our
+        // 30 s warning trigger. Pick whichever fires first.
+        uint64_t deadline_us = bus_deadline_us;
+        if (!warned_no_kwin_events) {
+            uint64_t our_deadline_us = bind_us + kwin_warn_after_us;
+            if (deadline_us == UINT64_MAX || our_deadline_us < deadline_us) {
+                deadline_us = our_deadline_us;
+            }
+        }
+
         timeval  tv{};
         timeval* tvp = nullptr;
-        if (bus_deadline_us != UINT64_MAX) {
-            timespec now{};
-            clock_gettime(CLOCK_MONOTONIC, &now);
-            uint64_t now_us = static_cast<uint64_t>(now.tv_sec) * 1'000'000ULL
-                            + static_cast<uint64_t>(now.tv_nsec) / 1'000ULL;
-            uint64_t rel = bus_deadline_us > now_us
-                           ? bus_deadline_us - now_us : 0;
+        if (deadline_us != UINT64_MAX) {
+            uint64_t rel = deadline_us > now_us ? deadline_us - now_us : 0;
             tv.tv_sec  = static_cast<time_t>(rel / 1'000'000ULL);
             tv.tv_usec = static_cast<suseconds_t>(rel % 1'000'000ULL);
             tvp = &tv;

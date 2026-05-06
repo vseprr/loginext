@@ -18,7 +18,7 @@
 
 pkgname=loginext-git
 _pkgname=loginext
-pkgver=r20.f5c276e
+pkgver=r21.626b231
 pkgrel=1
 pkgdesc="Userspace daemon + Tauri UI giving Logitech mice on Linux per-control customisation (Options+ on Linux). VCS build."
 arch=('x86_64')
@@ -62,6 +62,11 @@ makedepends=(
 
 provides=("${_pkgname}=${pkgver}")
 conflicts=("${_pkgname}")
+
+# Post-install hook: refresh udev so the new 99-loginext.rules takes effect
+# without requiring a reboot / receiver re-plug. The path is relative to
+# the PKGBUILD itself (Arch convention).
+install="loginext-git.install"
 
 # `git+file://...` is rewritten to the actual remote when the recipe is moved
 # out of the repo. The `#branch=main` fragment pins the build to the trunk so
@@ -158,6 +163,17 @@ EOF
                                                 "${pkgdir}/usr/share/kwin/scripts/loginext-focus/metadata.json"
     install -Dm0644 deploy/kwin/loginext-focus/contents/code/main.js \
                                                 "${pkgdir}/usr/share/kwin/scripts/loginext-focus/contents/code/main.js"
+
+    # udev rules — let the daemon run unprivileged. Without these the user
+    # would either need `sudo` for /dev/input/event* + /dev/uinput access
+    # (which breaks the dbus session-bus handshake under logind), or have
+    # to be added to the `input` group manually. With these rules
+    # systemd-logind grants ACL access to the active seat user and the
+    # daemon Just Works after the first plug-in. /usr/lib/udev/rules.d/ is
+    # the package-owned location; user-supplied overrides go in
+    # /etc/udev/rules.d/ and shadow these without conflict.
+    install -Dm0644 deploy/udev/99-loginext.rules \
+                                                "${pkgdir}/usr/lib/udev/rules.d/99-loginext.rules"
 
     # Documentation + license.
     install -Dm0644 LICENSE   "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"

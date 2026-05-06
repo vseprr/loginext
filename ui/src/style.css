@@ -110,7 +110,25 @@ html, body {
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   user-select: none;
-  overflow: hidden;
+  /* Allow document-level scroll as a last-resort escape hatch when the
+     window is squeezed below the layout's natural minimum. The three-column
+     grid still does its own per-column scrolling at normal sizes — this
+     covers extreme heights / narrow widths where rows would otherwise
+     clip status-bar buttons out of reach (`#app` was previously stuck at
+     `overflow: hidden`, which silently stranded controls at small sizes). */
+  overflow: auto;
+}
+
+/* Document-level scrollbar — narrow + neumorphic, matches the per-column
+   styling so the chrome stays consistent when both kick in. */
+html::-webkit-scrollbar,
+body::-webkit-scrollbar { width: 6px; height: 6px; }
+html::-webkit-scrollbar-track,
+body::-webkit-scrollbar-track { background: transparent; }
+html::-webkit-scrollbar-thumb,
+body::-webkit-scrollbar-thumb {
+  background: var(--neu-light);
+  border-radius: var(--radius-pill);
 }
 
 /* ─── Core neumorphic primitives (composable utility classes) ─────── */
@@ -473,88 +491,79 @@ html, body {
   box-shadow: var(--neu-in-sm);
 }
 
-.rules-list {
+/* ─── Context selector (Global + per-app toggle buttons) ─────────── */
+/*
+ * Appears below the Thumb Wheel control item. Each button is a raised
+ * neumorphic pill; the active one debosses into the surface.
+ */
+
+.context-selector {
   display: flex;
-  flex-direction: column;
+  flex-wrap: wrap;
   gap: var(--space-2);
+  padding: var(--space-3) 0 var(--space-1) 0;
 }
 
-.rules-empty {
-  font-size: 13px;
-  color: var(--text-faint);
-  font-style: italic;
-  padding: var(--space-2) var(--space-2);
-}
-
-.rule-row {
-  display: grid;
-  /* App name takes the rest, preset dropdown ~140px, delete is a circle. */
-  grid-template-columns: 1fr 140px 32px;
+.context-btn {
+  display: inline-flex;
   align-items: center;
-  gap: var(--space-3);
-  padding: var(--space-2) var(--space-3);
-  border-radius: var(--radius-md);
+  gap: 6px;
+  padding: 7px 14px;
+  border: none;
+  border-radius: var(--radius-pill);
   background: var(--surface);
-  box-shadow: var(--neu-out-xs);
-}
-
-.rule-row__app {
-  font-size: 13px;
-  color: var(--text);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
-}
-
-.rule-row__preset {
-  font: inherit;
+  color: var(--text-dim);
+  font-family: var(--font);
   font-size: 12px;
-  color: var(--text);
-  background: var(--surface);
-  border: none;
-  padding: 6px 10px;
-  border-radius: var(--radius-sm);
-  box-shadow: var(--neu-in-sm);
-  cursor: pointer;
-  appearance: none;
-}
-
-.rule-row__preset:focus {
-  outline: none;
-  box-shadow: var(--neu-in-sm), 0 0 0 2px var(--accent-glow);
-}
-
-.rule-row__delete {
-  font: inherit;
-  font-size: 18px;
-  line-height: 1;
-  font-weight: 400;
-  color: var(--text-faint);
-  background: var(--surface);
-  border: none;
-  width: 28px;
-  height: 28px;
-  border-radius: 50%;
+  font-weight: 500;
   cursor: pointer;
   box-shadow: var(--neu-out-xs);
-  display: flex;
-  align-items: center;
-  justify-content: center;
   transition: color var(--transition-fast),
-              box-shadow var(--transition-fast),
-              transform 120ms ease;
+              box-shadow var(--transition-med),
+              transform 140ms ease;
+  max-width: 140px;
+  overflow: hidden;
 }
 
-.rule-row__delete:hover {
-  color: #ff7a7a;
-  box-shadow: var(--neu-out-sm), 0 0 10px rgba(255, 122, 122, 0.25);
+.context-btn:hover:not(.context-btn--active) {
+  color: var(--text);
+  box-shadow: var(--neu-out-sm), 0 0 12px var(--accent-glow-sm);
   transform: translateY(-1px);
 }
 
-.rule-row__delete:active {
-  transform: translateY(0) scale(0.96);
+.context-btn:active:not(.context-btn--active) {
+  transform: translateY(0) scale(0.97);
   box-shadow: var(--neu-in-sm);
+}
+
+.context-btn--active {
+  color: var(--text-accent);
+  box-shadow: var(--neu-in-sm);
+}
+
+.context-btn__icon {
+  width: 16px;
+  height: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.context-btn__icon svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.context-btn__label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* ─── App header ─────────────────────────────────────────────────── */
@@ -608,7 +617,10 @@ html, body {
 .app-shell {
   display: flex;
   flex-direction: column;
-  height: 100%;
+  /* `min-height` rather than `height` so the shell can grow past the
+     viewport when the document needs to scroll — without this the shell
+     would clip its own children at very small window heights. */
+  min-height: 100%;
 }
 
 .app {
@@ -1062,10 +1074,41 @@ html, body {
 }
 
 /* ─── Responsive (narrow window) ─────────────────────────────────── */
+/*
+ * Two reflow regimes:
+ *   - <900px width: collapse the three columns into a single stack so
+ *     each card keeps its full natural width. Per-column scroll is
+ *     replaced by document-level scroll (each column gets `overflow:
+ *     visible` + auto height) so the status bar at the bottom of the
+ *     stack remains reachable instead of being trapped under a column
+ *     that scrolls independently.
+ *   - <620px height: same idea — when the viewport is squashed
+ *     vertically, the per-column overflow:auto regime can hide controls
+ *     that don't fit, so we let the document scroll the whole shell.
+ *
+ * Both regimes preserve every interactive element's reachability — the
+ * fix here is purely about overflow plumbing, not visual hierarchy.
+ */
 
 @media (max-width: 900px) {
   .app {
     grid-template-columns: 1fr;
-    grid-template-rows: auto auto 1fr;
+    grid-template-rows: auto auto auto;
+  }
+  .app__col {
+    overflow-y: visible;
+    min-height: 0;
+  }
+}
+
+@media (max-height: 620px) {
+  .app__col {
+    overflow-y: visible;
+    min-height: 0;
+  }
+  .app {
+    /* Let the columns determine their natural height; document scroll
+       takes over when the sum exceeds viewport height. */
+    grid-template-rows: auto;
   }
 }

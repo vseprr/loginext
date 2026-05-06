@@ -31,6 +31,7 @@ enum class PresetId : uint8_t {
     TabNav = 0,
     Zoom,                         // Ctrl+= / Ctrl+- (browser-style zoom)
     Count,                        // sentinel; not a real preset
+    None = 255,                   // passthrough — no preset bound
 };
 constexpr uint8_t preset_count = static_cast<uint8_t>(PresetId::Count);
 
@@ -57,6 +58,7 @@ constexpr const char* preset_id_str(PresetId p) noexcept {
     switch (p) {
         case PresetId::TabNav: return "tab_nav";
         case PresetId::Zoom:   return "zoom";
+        case PresetId::None:   return "none";
         case PresetId::Count:  break;
     }
     return "tab_nav";
@@ -66,6 +68,7 @@ constexpr const char* preset_name(PresetId p) noexcept {
     switch (p) {
         case PresetId::TabNav: return "Navigate between tabs";
         case PresetId::Zoom:   return "Zoom in / out";
+        case PresetId::None:   return "None (passthrough)";
         case PresetId::Count:  break;
     }
     return "Navigate between tabs";
@@ -101,6 +104,7 @@ constexpr const Preset& preset_for(PresetId id) noexcept {
     switch (id) {
         case PresetId::TabNav: return preset_tab_nav;
         case PresetId::Zoom:   return preset_zoom;
+        case PresetId::None:   return preset_tab_nav;  // unreachable; caller checks None
         case PresetId::Count:  break;
     }
     return preset_tab_nav;
@@ -129,6 +133,7 @@ constexpr bool preset_id_from_str(const char* s, std::size_t n, PresetId& out) n
     };
     if (eq("tab_nav")) { out = PresetId::TabNav; return true; }
     if (eq("zoom"))    { out = PresetId::Zoom;   return true; }
+    if (eq("none"))    { out = PresetId::None;   return true; }
     return false;
 }
 

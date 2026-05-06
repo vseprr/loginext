@@ -6,9 +6,15 @@
 #   loginext-logs -n 200       # show the last 200 lines, then stream
 #   loginext-logs --path       # print the resolved log path and exit
 #   loginext-logs --clear      # truncate the log (asks for confirmation)
+#   loginext-logs --live       # tail with grep for live emit/focus events
 #
 # The daemon writes to $XDG_STATE_HOME/loginext/daemon.log (falls back to
 # $HOME/.local/state/loginext/daemon.log when XDG_STATE_HOME is unset).
+#
+# NOTE: Key press/emit events are logged at TRACE level. To see them, the
+# daemon must be started with --verbose (or -v):
+#   sudo ./build/loginext --verbose
+# Without --verbose, only Debug-level and above appear in the log file.
 
 set -euo pipefail
 
@@ -30,6 +36,18 @@ case "${1:-}" in
         : > "$log_path"
         echo "loginext-logs: cleared"
         exit 0
+        ;;
+    --live)
+        # Show only emit and focus events (requires --verbose daemon)
+        if [[ ! -f "$log_path" ]]; then
+            echo "loginext-logs: $log_path does not exist yet — start the daemon first." >&2
+            echo "  hint: sudo ./build/loginext --verbose" >&2
+            exit 1
+        fi
+        echo "loginext-logs: streaming emit/focus events (daemon must run with --verbose)"
+        echo "  hint: sudo ./build/loginext --verbose"
+        echo "---"
+        exec tail -F "$log_path" | grep --line-buffered -E '(emit |scope: focus|config reloaded|app_rules)'
         ;;
 esac
 

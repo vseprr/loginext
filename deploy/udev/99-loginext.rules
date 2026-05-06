@@ -1,0 +1,47 @@
+# LogiNext — userspace access to the MX Master 3S event nodes and /dev/uinput.
+#
+# These rules let the daemon run unprivileged (the recommended workflow) by:
+#
+#   1. Granting the *currently logged-in seat user* an ACL on the matching
+#      device nodes via systemd-logind's `uaccess` tag. This is the modern
+#      replacement for blanket "input" group membership — access tracks the
+#      active session, so a multi-user box doesn't leak input access.
+#
+#   2. Falling back to GROUP="input" + MODE="0660" so users on systems
+#      without logind (or who explicitly opted into the `input` group) can
+#      still open the devices. Both layers compose: uaccess wins when both
+#      apply.
+#
+# Coverage:
+#   - /dev/uinput  — required by `core/emitter.cpp` (synthetic mouse + kbd).
+#   - MX Master 3S over Bolt receiver (046d:b034) — the supported pairing.
+#   - MX Master 3S direct USB        (046d:c548) — for cabled use.
+#
+# To extend (Phase 3 — other Logitech mice):
+#   - Add the pairing's USB ATTRS{idVendor}/idProduct in the `event*` line
+#     pattern below. The TAG+="uaccess" tag is what makes the rule work
+#     under logind; remove it only if you intentionally want input-group
+#     gating instead.
+#
+# After editing, reload with:
+#   sudo udevadm control --reload-rules
+#   sudo udevadm trigger --subsystem-match=input --subsystem-match=misc
+# (the package install runs both for you).
+
+# ─── /dev/uinput ─────────────────────────────────────────────────────────
+# `static_node=uinput` ensures the device node exists before the daemon
+# tries to open it, even on kernels where `uinput` is a module that
+# hasn't been autoloaded yet.
+KERNEL=="uinput", SUBSYSTEM=="misc", \
+    OPTIONS+="static_node=uinput", \
+    TAG+="uaccess", GROUP="input", MODE="0660"
+
+# ─── MX Master 3S — Bolt receiver (046d:b034) ────────────────────────────
+KERNEL=="event*", SUBSYSTEMS=="usb", \
+    ATTRS{idVendor}=="046d", ATTRS{idProduct}=="b034", \
+    TAG+="uaccess", GROUP="input", MODE="0660"
+
+# ─── MX Master 3S — direct USB cable (046d:c548) ─────────────────────────
+KERNEL=="event*", SUBSYSTEMS=="usb", \
+    ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c548", \
+    TAG+="uaccess", GROUP="input", MODE="0660"
