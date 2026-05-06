@@ -248,6 +248,25 @@ fn ipc_request(line: String) -> String {
     ipc_bridge::request(line)
 }
 
+/// Toggle the LogiNext window's always-on-top flag. Wired to the pin
+/// button in the UI header so the user can keep the LogiNext window
+/// visible while clicking around their other apps to set up per-app
+/// rules. Without this, focusing a target app sends LogiNext to the
+/// background, and the user can't reach the "+ Add rule" button
+/// without manually tiling or invoking the WM's "Keep Above" shortcut
+/// — the "window-focus paradox" the per-app rule UX otherwise has.
+///
+/// The frontend remembers the last value in localStorage and re-applies
+/// it on every launch (see `attachAlwaysOnTopPin` in main.ts), so the
+/// preference survives across UI restarts without needing a Tauri-side
+/// store.
+#[tauri::command]
+fn set_always_on_top(window: tauri::Window, on_top: bool) -> Result<(), String> {
+    window
+        .set_always_on_top(on_top)
+        .map_err(|e| format!("set_always_on_top: {e}"))
+}
+
 #[tauri::command]
 fn write_config(sensitivity: String, invert_hwheel: bool, active_preset: String) -> Result<(), String> {
     ipc_bridge::write_config(&sensitivity, invert_hwheel, &active_preset)
@@ -442,6 +461,17 @@ pub fn run() {
     // of subprocess calls), idempotent, and gated on KDE.
     ensure_kwin_script_enabled();
 
+    // Self-heal the systemd user unit at every UI launch. This catches
+    // the boot-time auto-restart loop the original heal-on-toggle path
+    // could not: when the unit is enabled+failing on every reboot, the
+    // toggle reads "ON" (is-active=activating), the user never clicks
+    // it, and the heal never runs. Now the heal runs unconditionally at
+    // startup so a buggy hardening directive (e.g. v1's missing `-`
+    // prefix on ReadWritePaths that 226/NAMESPACE'd at boot) is fixed
+    // the next time the user opens the UI, with no manual systemctl
+    // commands required. Cheap when there's nothing to fix.
+    service::heal_at_startup();
+
     // Spawn-or-detect runs on the main thread before the window opens — keeps
     // the first frame coherent with the daemon state we report. The probe is
     // fast (single connect attempt) when the daemon is already up.
@@ -465,6 +495,7 @@ pub fn run() {
             service_state,
             service_enable,
             service_disable,
+            set_always_on_top,
         ])
         .run(tauri::generate_context!());
 

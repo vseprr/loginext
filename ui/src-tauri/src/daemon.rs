@@ -73,7 +73,12 @@ fn socket_alive(path: &Path) -> bool {
 ///      minimal PATH that does not include the user's local bin dir.
 ///      See: https://specifications.freedesktop.org/basedir-spec — XDG does
 ///      not mandate ~/.local/bin be on PATH for graphical sessions.
-fn resolve_daemon_binary() -> Option<PathBuf> {
+///
+/// Public so the systemd self-heal in `service.rs` can reuse it: a
+/// regenerated unit file's `ExecStart=` must point at exactly the same
+/// binary the spawn-detached path would launch, otherwise the toggle's
+/// two modes diverge in subtle ways (different `--quiet` framing, etc.).
+pub fn resolve_daemon_binary() -> Option<PathBuf> {
     if let Ok(p) = std::env::var("LOGINEXT_DAEMON") {
         let path = PathBuf::from(p);
         if path.is_file() {

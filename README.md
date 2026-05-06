@@ -13,10 +13,10 @@ The UI launches the daemon on demand and detaches from it. Once the daemon is ru
 | Phase | What it covers | State |
 |---|---|---|
 | 1 | Thumb wheel → `Ctrl+Tab` / `Ctrl+Shift+Tab`, three sensitivity profiles, gesture heuristics | ✅ shipped |
-| 2 | Neumorphism dark UI, daemon spawn/respawn lifecycle, per-control preset assignment, Zoom preset, per-application scope (X11 + Hyprland), native Arch PKGBUILD | 🚧 in progress |
-| 3 | Other MX Master 3S controls (Back/Forward, gesture button, vertical wheel) + new presets (volume, custom keystroke) | planned |
+| 2 | Neumorphism dark UI, daemon spawn / respawn lifecycle (now systemd-driven), per-control preset assignment, Zoom + passthrough presets, per-app rules with per-app sensitivity / invert overrides, KWin DBus focus bridge for Plasma 6, udev-rules for unprivileged hardware access, native Arch PKGBUILD with auto KPackage registration, always-on-top pin | ✅ stable |
+| 3 | Other MX Master 3S controls (Back / Forward, gesture button, vertical wheel, Mode-shift) + new preset families (volume, custom keystroke, run command) | 🚧 planned |
 
-Detailed roadmap: [progress.md](./progress.md). Shipped fixes: [CHANGELOG.md](./CHANGELOG.md).
+Detailed roadmap: [progress.md](./progress.md). Release-by-release feature history: [CHANGELOG.md](./CHANGELOG.md). Architectural decisions and deferred audit findings: [KNOWN_ISSUES.md](./KNOWN_ISSUES.md).
 
 ---
 

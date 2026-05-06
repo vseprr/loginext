@@ -221,4 +221,9 @@ export const ipc = {
   serviceState:   () => invokeService("service_state"),
   serviceEnable:  () => invokeService("service_enable"),
   serviceDisable: () => invokeService("service_disable"),
+  // Window-manager: pin the UI above other windows. Used by the
+  // header pin button to keep LogiNext visible while the user clicks
+  // around their other apps to register per-app rules.
+  setAlwaysOnTop: (onTop: boolean) =>
+    invoke<void>("set_always_on_top", { onTop }),
 };

@@ -52,7 +52,16 @@ StartLimitBurst=5
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=%S/loginext %t/loginext.sock
+# Leading `-` makes each path optional. Critical for `%t/loginext.sock`:
+# at service start the socket FILE does not exist yet (the daemon creates
+# it during init), and ProtectHome=read-only locks /run/user/<uid>
+# read-only inside the mount namespace. Without `-`, systemd's
+# namespacing step fails with `226/NAMESPACE` ("Failed to set up mount
+# namespacing: ... No such file or directory") *before* exec runs, and
+# the unit auto-restart-loops without ever launching the daemon. The
+# `-` lets systemd register the writable mount lazily so the daemon
+# can create the socket as it normally would.
+ReadWritePaths=-%S/loginext -%t/loginext.sock
 PrivateTmp=true
 ProtectKernelTunables=true
 ProtectKernelModules=true

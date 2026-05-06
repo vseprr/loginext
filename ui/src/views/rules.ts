@@ -40,6 +40,23 @@ let activeRowEl: HTMLElement | null = null;
 let pollTimer: ReturnType<typeof setInterval> | null = null;
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
 
+// Fingerprint of the last `renderActive()` output. The 250 ms active-app
+// poll calls renderActive() on every tick, but four times a second the
+// inputs are unchanged in the steady state — we used to throw away the
+// entire `.rules-active__row` DOM (and the "+ Add rule" button inside
+// it) just to rebuild an identical tree. The cursor would lose :hover
+// for one frame on every rebuild, which presented as a 4 Hz strobe of
+// the button (the "flicker" the previous CSS shadow-count fix could
+// not address — the real cause was DOM thrashing, not the box-shadow
+// transition curve). Now we hash the inputs and short-circuit when the
+// fingerprint matches, so the button stays mounted across polls and
+// the cursor's :hover state survives uninterrupted.
+//
+// Set to `null` to invalidate (e.g. on first mount, or when an explicit
+// mutation flow knows the DOM must rebuild even if the inputs string
+// hasn't changed yet).
+let lastRenderFingerprint: string | null = null;
+
 const SAVE_DEBOUNCE_MS = 250;
 // 3 s was chosen to keep IPC traffic minimal back when the daemon-side
 // active-window detection was the bottleneck. Now that the listener
@@ -197,8 +214,40 @@ async function refreshActiveApp(): Promise<void> {
 
 // ── Rendering ────────────────────────────────────────────────────────
 
+// Compute a deterministic fingerprint over everything `renderActive`
+// reads. Order matters — keep this in sync with the render body below.
+function activeRenderFingerprint(): string {
+  if (!activeApp) return "no-app";
+  const appKey  = activeApp.name.trim();
+  const source  = activeApp.source;
+  const globpre = activeApp.global_preset ?? "";
+  const rule    = appKey ? findRule(appKey) : undefined;
+  // `presets` only affects the live label via presetName(); track its
+  // length so an asynchronous preset-list load triggers exactly one
+  // re-render (the new label may differ from the cached "(unknown)").
+  const presetsLen = presets.length;
+  return [
+    appKey || "",
+    source || "",
+    globpre || "",
+    rule ? `r:${rule.preset}` : "no-rule",
+    `p:${presetsLen}`,
+  ].join("|");
+}
+
 function renderActive(): void {
   if (!activeRowEl) return;
+
+  // Skip the DOM rebuild when none of the inputs changed since the last
+  // render. Without this short-circuit, the 250 ms poll destroys and
+  // re-creates the "+ Add rule" button four times a second; a cursor
+  // sitting on the button loses its :hover state on every rebuild,
+  // which reads as a strobing flicker. See `lastRenderFingerprint`
+  // above for the full rationale.
+  const fp = activeRenderFingerprint();
+  if (fp === lastRenderFingerprint) return;
+  lastRenderFingerprint = fp;
+
   activeRowEl.innerHTML = "";
 
   const label = document.createElement("div");

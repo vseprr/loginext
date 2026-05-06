@@ -793,6 +793,76 @@ function createStatusButton(): StatusButton {
   return { el: btn, set };
 }
 
+// ── Always-on-top pin ───────────────────────────────────────────────
+//
+// Solves the "window-focus paradox" inherent to per-app rule
+// authoring: clicking the target app to focus it sends the LogiNext
+// window to the back, which means the user can't reach the
+// "+ Add rule" button on the focused-app row without first tiling
+// or invoking the WM's "Keep Above" shortcut. The pin button in the
+// header lets the user opt into Always-on-Top so LogiNext stays
+// hovering while they click around.
+//
+// Persistence: localStorage. Tauri 2's window state plugin would also
+// work but it's a heavier dependency for one boolean. The localStorage
+// flag is read on every UI launch and re-applied via Tauri before the
+// first paint settles, so a user who pinned during one session sees
+// the pin survive across UI restarts.
+
+const ALWAYS_ON_TOP_KEY = "always_on_top";
+
+function readAlwaysOnTop(): boolean {
+  try { return localStorage.getItem(ALWAYS_ON_TOP_KEY) === "true"; }
+  catch { return false; }
+}
+
+function writeAlwaysOnTop(value: boolean): void {
+  try {
+    if (value) localStorage.setItem(ALWAYS_ON_TOP_KEY, "true");
+    else localStorage.removeItem(ALWAYS_ON_TOP_KEY);
+  } catch { /* private mode / disabled storage */ }
+}
+
+export async function attachAlwaysOnTopPin(pin: HTMLButtonElement): Promise<void> {
+  // Apply the persisted state to the window before paint so the pin
+  // takes effect on launch without an explicit click. The Tauri call
+  // can fail on hosts where the window manager refuses Always-on-Top
+  // (rare; some Wayland compositors gate it behind a permission). We
+  // surface that as a console.warn so an inspector-savvy user can see
+  // why the pin "doesn't stick", and revert the visual state.
+  let pinned = readAlwaysOnTop();
+  pin.classList.toggle("app-header__pin--active", pinned);
+  pin.setAttribute("aria-pressed", String(pinned));
+
+  if (pinned) {
+    try { await ipc.setAlwaysOnTop(true); }
+    catch (e) {
+      // eslint-disable-next-line no-console
+      console.warn("[loginext-ui] set_always_on_top(true) failed:", e);
+      pinned = false;
+      writeAlwaysOnTop(false);
+      pin.classList.remove("app-header__pin--active");
+      pin.setAttribute("aria-pressed", "false");
+    }
+  }
+
+  pin.addEventListener("click", async () => {
+    const next = !pinned;
+    try {
+      await ipc.setAlwaysOnTop(next);
+      pinned = next;
+      writeAlwaysOnTop(next);
+      pin.classList.toggle("app-header__pin--active", next);
+      pin.setAttribute("aria-pressed", String(next));
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.warn("[loginext-ui] set_always_on_top(", next, ") failed:", e);
+      // Don't flip persisted state on failure — the user's intent
+      // didn't apply, so the persisted bit shouldn't claim it did.
+    }
+  });
+}
+
 // The toggle's truth source. When the unit file is present, we drive
 // the daemon lifecycle entirely through `systemctl --user enable/disable
 // --now` so the user's intent ("ON should mean: start now AND start at

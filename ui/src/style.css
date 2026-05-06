@@ -475,22 +475,37 @@ body::-webkit-scrollbar-thumb {
   border-radius: 999px;
   cursor: pointer;
   /*
-   * Why no `transform: translateY(-1px)` on hover anymore:
+   * Two distinct flicker causes converged on this button — both need to
+   * be addressed for the hover state to stay solid:
    *
-   * The button sits inside `.rules-active__row`, a flex container with
-   * `min-height: 44px`. A 1 px hover-lift moved the button's bounding
-   * box up by one pixel, which on systems where the cursor sat exactly
-   * on the original bottom edge would yank the cursor *off* the button,
-   * which immediately removed :hover, which dropped the lift, which
-   * placed the cursor back on the button — a textbook hover-lift jitter
-   * loop manifesting as the strobe the user reported.
+   * 1. Bounding-box hover-lift jitter. The previous CSS used
+   *    `transform: translateY(-1px)` on hover. For cursors sitting at
+   *    the bottom edge of the button that 1 px shift was enough to drop
+   *    the :hover pseudo, which dropped the lift, which placed the
+   *    cursor back inside the button — a textbook hover-lift jitter
+   *    loop. Removed.
    *
-   * The fix is to remove the layout-shifting transform on hover and
-   * keep the visual feedback as a pure shadow / colour change. The
-   * `:active` press state still uses `scale(0.98)` because a click is
-   * a momentary event and can't trigger the same feedback loop.
+   * 2. box-shadow shadow-count mismatch. `box-shadow` transitions
+   *    interpolate per-shadow only when the source and target lists
+   *    have the *same number of shadow declarations*. The base state
+   *    used `var(--neu-out-xs)` (which is 2 shadows) and the hover
+   *    state used `var(--neu-out-sm), 0 0 12px var(--accent-glow-sm)`
+   *    (3 shadows). When counts differ, browsers fall back to a discrete
+   *    crossfade — that's the ~50 ms strobe between the two
+   *    snapshots that read as a flicker on WebKitGTK 6.
+   *
+   *    Fix: pad the base state with a transparent third shadow so the
+   *    transition has a 1:1 mapping in both directions. The target
+   *    glow is the third entry in both states; the first two carry the
+   *    neumorphic dual-shadow pair and interpolate cleanly between
+   *    `xs` and `sm`.
+   *
+   * The :active press state stays at `scale(0.97)` because a click is
+   * momentary and can't sustain the feedback loop in (1).
    */
-  box-shadow: var(--neu-out-xs);
+  box-shadow:
+    var(--neu-out-xs),
+    0 0 12px transparent;
   transition: box-shadow var(--transition-fast),
               color      var(--transition-fast),
               transform  120ms ease;
@@ -498,9 +513,9 @@ body::-webkit-scrollbar-thumb {
 
 .rules-add:hover {
   color: var(--accent);
-  /* Single coherent glow — no compound shadow stack, so the value
-     never lands "between" two transition snapshots that would cause
-     a sub-pixel rounding flash on WebKitGTK. */
+  /* Same shadow count as the base so the transition interpolates
+     instead of discrete-stepping. The third shadow goes from
+     transparent → tinted, the first two crossfade in radius. */
   box-shadow:
     var(--neu-out-sm),
     0 0 12px var(--accent-glow-sm);
@@ -508,7 +523,9 @@ body::-webkit-scrollbar-thumb {
 
 .rules-add:active {
   transform: scale(0.97);
-  box-shadow: var(--neu-in-sm);
+  box-shadow:
+    var(--neu-in-sm),
+    0 0 12px transparent;
 }
 
 /* ─── Context selector (Global + per-app toggle buttons) ─────────── */
@@ -706,6 +723,84 @@ body::-webkit-scrollbar-thumb {
   border-radius: var(--radius-pill);
   background: var(--surface);
   box-shadow: var(--neu-in-sm);
+}
+
+/* Pushes everything after it to the right end of the header — the pin
+   button uses this as a flex spacer so it lives flush-right without
+   needing absolute positioning. */
+.app-header__spacer {
+  flex: 1;
+}
+
+/* Always-on-top pin in the header. Off = outlined pin (text-faint);
+   on = filled-tilted pin (accent), with a small accent glow so the
+   "active" state reads at a glance. Same dual-shadow neumorphic
+   recipe as the rest of the header pills.
+
+   Same shadow-count discipline as `.rules-add` — base, hover, and
+   active states all carry exactly two shadows so `box-shadow`
+   transitions interpolate cleanly instead of crossfading discretely
+   (which is what produced the "+ Add rule" flicker on WebKitGTK 6
+   before we padded those states). */
+.app-header__pin {
+  width: 32px;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 50%;
+  cursor: pointer;
+  background: var(--surface);
+  color: var(--text-faint);
+  box-shadow:
+    var(--neu-out-xs),
+    0 0 12px transparent;
+  transition:
+    color      var(--transition-fast),
+    box-shadow var(--transition-fast),
+    transform  140ms ease;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.app-header__pin svg {
+  width: 16px;
+  height: 16px;
+  /* The icon is rotated when active — the pin is "pressed in". */
+  transition: transform var(--transition-fast),
+              stroke    var(--transition-fast);
+}
+
+.app-header__pin:hover {
+  color: var(--text);
+  box-shadow:
+    var(--neu-out-sm),
+    0 0 12px var(--accent-glow-sm);
+}
+
+.app-header__pin:active {
+  transform: scale(0.94);
+  box-shadow:
+    var(--neu-in-sm),
+    0 0 12px transparent;
+}
+
+.app-header__pin--active {
+  color: var(--text-accent);
+  box-shadow:
+    var(--neu-in-sm),
+    0 0 12px var(--accent-glow);
+}
+
+.app-header__pin--active svg {
+  transform: rotate(30deg);
+}
+
+.app-header__pin--active:hover {
+  color: var(--accent);
+  box-shadow:
+    var(--neu-in-sm),
+    0 0 14px var(--accent-glow);
 }
 
 /* ─── App shell (three-column Options+-style layout) ─────────────── */
