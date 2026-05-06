@@ -11,7 +11,11 @@ void clear(RuleTable& t) noexcept {
     t.count = 0;
 }
 
-bool insert(RuleTable& t, uint32_t app_hash, presets::PresetId p) noexcept {
+bool insert(RuleTable& t,
+            uint32_t app_hash,
+            presets::PresetId preset,
+            config::SensitivityMode mode,
+            int8_t invert) noexcept {
     if (app_hash == 0) return false;                 // sentinel collision
     if (t.count >= rule_capacity / 2) return false;  // keep load factor < 0.5
 
@@ -21,12 +25,16 @@ bool insert(RuleTable& t, uint32_t app_hash, presets::PresetId p) noexcept {
         AppRule& r = t.slots[(i + step) & mask];
         if (r.app_hash == 0) {
             r.app_hash = app_hash;
-            r.preset   = p;
+            r.preset   = preset;
+            r.mode     = mode;
+            r.invert   = invert;
             ++t.count;
             return true;
         }
         if (r.app_hash == app_hash) {                // overwrite duplicates
-            r.preset = p;
+            r.preset = preset;
+            r.mode   = mode;
+            r.invert = invert;
             return true;
         }
     }

@@ -118,6 +118,15 @@ npm run tauri dev
 
 The Tauri shell probes `$XDG_RUNTIME_DIR/loginext.sock`. If the socket isn't alive, it spawns the daemon as a fully detached background process (`setsid`, stdio → `/dev/null`). Closing the UI window does **not** kill the daemon — reopening reconnects to the existing socket.
 
+**KDE Plasma developers running `tauri dev`:** the package install path normally registers the focus-bridge KWin script via `kpackagetool6`, but a dev build hasn't been packaged yet. The Tauri shell auto-runs `kpackagetool6 --type KWin/Script --upgrade <path>` against the source tree at `deploy/kwin/loginext-focus/` on every launch, falling back to a direct copy into `~/.local/share/kwin/scripts/loginext-focus/` if the tooling isn't available. If you skip the UI entirely (running just the daemon for kernel-side debugging), you'll need to register the script by hand the first time:
+
+```bash
+kpackagetool6 --type KWin/Script --install deploy/kwin/loginext-focus
+qdbus6 org.kde.KWin /KWin reconfigure
+```
+
+Without that step the daemon's KWin DBus listener binds successfully but never receives `Activated()` calls; it'll log a 30 s "ZERO Activated() calls received" warning to point you back here.
+
 ### From the terminal (for development / debugging)
 
 ```bash
@@ -156,20 +165,24 @@ A starter file lives at [config/example.json](./config/example.json).
 
 The UI writes this file on every change and asks the daemon to reload — you do not have to edit JSON by hand.
 
-### Per-application rules (Phase 2.5)
+### Per-application rules (Phase 2.5+)
 
-A sidecar text file at `$XDG_CONFIG_HOME/loginext/app_rules.txt` overrides `active_preset` per focused window:
+A sidecar text file at `$XDG_CONFIG_HOME/loginext/app_rules.txt` carries per-app overrides for the global preset, sensitivity, and invert axis:
 
 ```text
-# one rule per line: <app_id>=<preset_id>
+# Format: <app_id>=<preset>[,<mode>[,<invert>]]
+#   preset:  tab_nav | zoom | none | (empty = tracked-only chip)
+#   mode:    low | medium | high | (empty = inherit global)
+#   invert:  true | false | (empty = inherit global)
 firefox=tab_nav
-code=zoom
-gimp=zoom
+code=zoom,high,true        # zoom preset, high sensitivity, inverted
+gimp=zoom,,false           # zoom preset, inherit sensitivity, normal scroll
+inkscape=                  # tracked-only chip (UI shows it; daemon ignores)
 ```
 
-App ids are case-insensitive — they're the X11 `WM_CLASS` (instance name preferred) or the Hyprland window class. The daemon hashes them at load time so the hot path only ever runs an integer compare against an atomic published by the active-window listener thread. If no rule matches, the global `active_preset` from `config.json` applies.
+App ids are case-insensitive — they're the X11 `WM_CLASS` (instance name preferred), the Hyprland window class, or the KWin `resourceName`. The daemon hashes them at load time so the hot path only ever runs an integer compare against an atomic published by the active-window listener thread. Each field after `preset` is independent: an empty `mode` falls back to the global sensitivity at the moment of resolution (so a later `kwriteconfig`-style global change automatically propagates); a non-empty `mode` sticks until the user changes the rule.
 
-**UI workflow:** The UI manages rules through a context-aware preset selector. When you click the Thumb Wheel control, a context bar appears with a "Global" button and per-app buttons (one for each app that has a rule). Select a context, then click a preset in the "Available Presets" list to bind it. Clicking an already-active preset deselects it — for an app context this removes the rule; for the global context this sets `active_preset` to `"none"` (raw passthrough, the thumb wheel emits unprocessed HWHEEL events).
+**UI workflow:** The UI manages everything through a context-aware preset selector. Click the Thumb Wheel control to expose the context bar, then pick "Global" or any per-app chip; the right panel reflects whatever sensitivity and invert that context resolves to, and writes back to the same context. To remove a chip, hover it and click the X that fades in on the right; deselecting a preset only *unbinds* the rule (the chip stays so you can re-bind without re-focusing the app). Clicking an already-active preset on the global context sets `active_preset` to `"none"` (raw passthrough, the thumb wheel emits unprocessed HWHEEL events).
 
 A reference file with common bindings lives at [config/app_rules.example.txt](./config/app_rules.example.txt). Reload after editing with `pkill -HUP loginext` (or any UI action that triggers a reload).
 
@@ -273,20 +286,21 @@ Other one-shot probes through the same socket: `'{"cmd":"get_active_app"}'` repo
 | Daemon crashes mid-session | Heartbeat detects within 2–5 s, status bar flips to `daemon: unreachable`, Tauri runs the spawn check again. Backoff: 2 s → 4 s → 8 s → 16 s → 30 s (capped). |
 | You change a setting in the UI | UI writes `config.json`, sends `reload`, daemon acks only after the new settings are live. |
 
-### Optional: run the daemon as a systemd user service
+### systemd user service (driven by the UI toggle)
 
-The default workflow (UI spawns daemon on demand) needs no system integration. If you want the daemon to start at login regardless of whether the UI is opened:
+Both the PKGBUILD and `deploy/install.sh` ship `loginext.service` as a systemd-user unit:
+- pacman: `/usr/lib/systemd/user/loginext.service` (ExecStart=`/usr/bin/loginext --quiet`)
+- script install: `~/.config/systemd/user/loginext.service` (ExecStart auto-rewritten to `~/.local/bin/loginext`)
+
+The DAEMON ONLINE/OFFLINE button at the bottom of the UI is now a thin wrapper around the unit. Click ON → `systemctl --user enable --now loginext.service` (starts the daemon AND installs the autostart symlink, so it survives reboots). Click OFF → `systemctl --user disable --now loginext.service` (stops it AND removes the symlink). On UI launch the toggle reads `is-active` + `is-enabled` so its position is the source of truth from systemd, not a localStorage sentinel.
+
+If the unit file isn't installed (older build, manual cmake-only flow), the toggle falls back to the legacy spawn-detached + `kill_daemon` IPC path — no functional regression, you just lose the autostart bit. To opt out manually:
 
 ```bash
-mkdir -p ~/.config/systemd/user
-cp deploy/systemd/loginext.service ~/.config/systemd/user/
-# Edit ExecStart= if `loginext` is not on $PATH, then:
-systemctl --user daemon-reload
-systemctl --user enable --now loginext.service
-journalctl --user -u loginext.service -f
+systemctl --user disable --now loginext.service     # full off
+journalctl --user -u loginext.service -f            # live log via journald
+systemctl --user reload loginext.service            # SIGHUP-style config reload
 ```
-
-`SIGHUP`-style reloads still work via `systemctl --user reload loginext.service`.
 
 ---
 

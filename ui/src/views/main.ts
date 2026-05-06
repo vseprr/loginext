@@ -6,7 +6,9 @@ import { ipc, type SettingsResponse, type DevicesResponse,
          type Preset, type AppRule } from "../ipc/client";
 import { rulesCard, getRules, getPresets, onRulesChange,
          addRule as rulesAddRule, updateRule as rulesUpdateRule,
-         deleteRule as rulesDeleteRule, getActiveApp } from "./rules";
+         deleteRule as rulesDeleteRule, unbindRule as rulesUnbindRule,
+         setRuleMode as rulesSetMode, setRuleInvert as rulesSetInvert,
+         getActiveApp } from "./rules";
 
 type Mode = "low" | "medium" | "high";
 
@@ -133,6 +135,23 @@ function showToast(message: string, type: "success" | "error" = "success") {
 // ── Apply settings (write config → reload daemon) ─────────────────
 
 async function applyCurrentSettings() {
+  // Hard guard: this function writes settings.json and triggers a
+  // daemon reload of the *global* config. It must never run while an
+  // app context is active — otherwise sensitivity/invert toggled for
+  // "code" would also clobber the global value and the per-app
+  // decoupling would silently regress. Every existing call site
+  // already gates on `currentContext.type === "global"`; this assert
+  // is the canary that catches a future refactor that drops the
+  // gate by mistake.
+  if (currentContext.type !== "global") {
+    // eslint-disable-next-line no-console
+    console.warn(
+      "[loginext-ui] applyCurrentSettings called from app context",
+      currentContext.app,
+      "— this is a bug; per-app overrides must go through rulesSetMode/rulesSetInvert.",
+    );
+    return;
+  }
   if (applying) return;
   const mode   = currentMode   ?? "medium";
   const invert = currentInvert ?? true;
@@ -313,10 +332,16 @@ function controlColumn(): HTMLElement {
   // Per-app rules card (keeps "Currently focused" + "+ Add rule")
   col.appendChild(rulesCard(showToast));
 
-  // Listen for rule mutations from the rules module
+  // Listen for rule mutations from the rules module. Anything that
+  // changes the rules (add/remove/unbind, mode/invert override) needs to
+  // refresh the chip bar, the preset highlight, AND the right panel —
+  // otherwise the segmented/toggle could go stale when the user edits a
+  // chip's overrides via the same chip context they're already on.
   onRulesChange((_rules: AppRule[]) => {
     renderContextBar();
     refreshPresetListHighlight();
+    updatePresetHeader();
+    syncRightPanelToContext();
   });
 
   return col;
@@ -350,29 +375,66 @@ function renderContextBar(): void {
     renderContextBar();
     refreshPresetListHighlight();
     updatePresetHeader();
+    syncRightPanelToContext();
   });
   contextBarEl.appendChild(globalBtn);
 
-  // Per-app buttons for each rule
+  // Per-app buttons for each rule. The chip stays in the bar even if its
+  // preset binding has been cleared — the user explicitly removes it via
+  // the X button in the corner. Chips with empty `preset` render dimmer
+  // ("inactive") so the visual hierarchy still reflects which apps have
+  // a daemon-side rule and which are tracked-only context entries.
   for (const r of rules) {
+    const isActive = currentContext.type === "app" && currentContext.app === r.app;
+    const isInactive = !r.preset;
     const appBtn = document.createElement("button");
     appBtn.type = "button";
-    appBtn.className = "context-btn" +
-      (currentContext.type === "app" && currentContext.app === r.app ? " context-btn--active" : "");
-    appBtn.title = r.app;
+    appBtn.className =
+      "context-btn" +
+      (isActive ? " context-btn--active" : "") +
+      (isInactive ? " context-btn--inactive" : "");
+    appBtn.title = r.app + (isInactive ? " (no preset bound — tracked only)" : "");
     const appIcon = document.createElement("span");
     appIcon.className = "context-btn__icon";
     appIcon.innerHTML = appSvg;
     const appLabel = document.createElement("span");
     appLabel.className = "context-btn__label";
     appLabel.textContent = r.app;
+
+    // X button — appears on hover via CSS. Clicking it removes the chip
+    // entirely (the rule is wiped from app_rules.txt + the daemon's
+    // hash table on the next save+reload). Stops propagation so the
+    // click doesn't also switch context to a chip we're about to delete.
+    const closeBtn = document.createElement("span");
+    closeBtn.className = "context-btn__close";
+    closeBtn.setAttribute("role", "button");
+    closeBtn.setAttribute("aria-label", `Remove ${r.app}`);
+    closeBtn.title = `Remove "${r.app}"`;
+    closeBtn.innerHTML =
+      `<svg viewBox="0 0 12 12" aria-hidden="true">` +
+      `<path d="M3 3 L9 9 M9 3 L3 9" stroke="currentColor" stroke-width="1.6" ` +
+      `stroke-linecap="round"/></svg>`;
+    closeBtn.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      const wasActive =
+        currentContext.type === "app" && currentContext.app === r.app;
+      rulesDeleteRule(r.app);
+      if (wasActive) {
+        currentContext = { type: "global" };
+      }
+      // No need to call renderContextBar() / refresh* here — the
+      // onRulesChange subscription below already does both.
+    });
+
     appBtn.appendChild(appIcon);
     appBtn.appendChild(appLabel);
+    appBtn.appendChild(closeBtn);
     appBtn.addEventListener("click", () => {
       currentContext = { type: "app", app: r.app };
       renderContextBar();
       refreshPresetListHighlight();
       updatePresetHeader();
+      syncRightPanelToContext();
     });
     contextBarEl.appendChild(appBtn);
   }
@@ -469,21 +531,14 @@ async function handlePresetClick(p: Preset): Promise<void> {
     refreshPresetListHighlight();
     updatePresetHeader();
   } else {
-    // App context
+    // App context. Deselecting clears the *preset binding* but keeps
+    // the chip in the bar (preserving any per-app sensitivity / invert
+    // overrides), so the user can re-bind without re-focusing the app.
+    // Explicit deletion lives on the X button on each chip.
     const appName = currentContext.app;
     if (activeId === p.id) {
-      // Deselect: remove the per-app rule entirely
-      rulesDeleteRule(appName);
-      // If no rules left for this app, switch back to global context
-      const remaining = getRules().find(
-        (r) => r.app.toLowerCase() === appName.toLowerCase()
-      );
-      if (!remaining) {
-        currentContext = { type: "global" };
-        renderContextBar();
-      }
+      rulesUnbindRule(appName);
     } else {
-      // Select: create or update per-app rule
       const existing = getRules().find(
         (r) => r.app.toLowerCase() === appName.toLowerCase()
       );
@@ -564,6 +619,36 @@ function updatePresetHeader(): void {
   }
 }
 
+// Reflect the current context's sensitivity/invert into the right-panel
+// controls. On app context with no per-app override, the global value is
+// shown — but writes from these controls always target the active
+// context (so a user inspecting "code" can't accidentally edit the
+// global by reaching for the Sensitivity pills).
+function syncRightPanelToContext(): void {
+  if (currentContext.type === "global") {
+    if (currentMode != null)   syncSegmented(currentMode);
+    if (currentInvert != null) syncToggle(currentInvert);
+    return;
+  }
+  // App context: read from the rule, fall back to global on inherit.
+  const ctx = currentContext;
+  const rule = getRules().find(
+    (r) => r.app.toLowerCase() === ctx.app.toLowerCase()
+  );
+  const ruleMode   = rule?.mode ?? "";
+  const ruleInvert = rule?.invert ?? null;
+  const effectiveMode: Mode =
+    ruleMode === "low" || ruleMode === "medium" || ruleMode === "high"
+      ? ruleMode
+      : (currentMode ?? "medium");
+  const effectiveInvert =
+    ruleInvert === null || ruleInvert === undefined
+      ? (currentInvert ?? true)
+      : ruleInvert;
+  syncSegmented(effectiveMode);
+  syncToggle(effectiveInvert);
+}
+
 function presetColumn(): HTMLElement {
   const col = document.createElement("div");
   col.className = "app__col";
@@ -601,8 +686,15 @@ function presetColumn(): HTMLElement {
       { value: "high",   label: "High" },
     ],
     onChange: (m) => {
-      currentMode = m;
-      void applyCurrentSettings();
+      // Dispatch to the active context. Global writes settings.json (the
+      // existing path); app context writes the rule's mode override so
+      // changing sensitivity for "code" no longer also changes Global.
+      if (currentContext.type === "app") {
+        rulesSetMode(currentContext.app, m);
+      } else {
+        currentMode = m;
+        void applyCurrentSettings();
+      }
     },
   });
 
@@ -624,8 +716,13 @@ function presetColumn(): HTMLElement {
   toggleEl = toggle({
     checked: false,
     onChange: (v) => {
-      currentInvert = v;
-      void applyCurrentSettings();
+      // Same context-aware split as Sensitivity above.
+      if (currentContext.type === "app") {
+        rulesSetInvert(currentContext.app, v);
+      } else {
+        currentInvert = v;
+        void applyCurrentSettings();
+      }
     },
   });
 
@@ -696,62 +793,107 @@ function createStatusButton(): StatusButton {
   return { el: btn, set };
 }
 
+// The toggle's truth source. When the unit file is present, we drive
+// the daemon lifecycle entirely through `systemctl --user enable/disable
+// --now` so the user's intent ("ON should mean: start now AND start at
+// next login") is captured in systemd's autostart graph. When the unit
+// is absent (older install / manual build), we fall back to the legacy
+// spawn-detached + kill_daemon path so the toggle remains functional.
+type LifecycleMode = "systemd" | "spawn";
+
 export async function attachHeartbeat(bar: HTMLElement): Promise<void> {
   bar.className = "status-bar";
 
   const status = createStatusButton();
   bar.appendChild(status.el);
 
-  let failures = 0;
   let timer: ReturnType<typeof setTimeout> | null = null;
   let busy = false;
+  let mode: LifecycleMode = "spawn";   // resolved on first state probe
+  let failures = 0;                     // only used in spawn mode
 
   const schedule = (ms: number) => {
     if (timer) clearTimeout(timer);
     timer = setTimeout(beat, ms);
   };
 
-  if (isForcedOff()) {
-    status.set("offline");
-    try { await ipc.daemonKill(); } catch { /* best-effort */ }
+  // ── Initial state ──────────────────────────────────────────────────
+  // Source of truth on launch: systemd. Falls back to socket-probe for
+  // hosts without the unit file installed.
+  const initialSrv = await ipc.serviceState().catch(() => null);
+  if (initialSrv?.ok && initialSrv.available) {
+    mode = "systemd";
+    const on = !!(initialSrv.active && initialSrv.enabled);
+    status.set(on ? "online" : "offline");
+    // Clear any stale localStorage flag — the systemd path is now
+    // authoritative for intent, so the legacy `daemon_forced_off`
+    // sentinel must not silently override it on the next launch.
+    setForcedOff(false);
+  } else {
+    mode = "spawn";
+    if (isForcedOff()) {
+      status.set("offline");
+      try { await ipc.daemonKill(); } catch { /* best-effort */ }
+    }
   }
 
+  // ── Click handler ──────────────────────────────────────────────────
   status.el.addEventListener("click", async () => {
     if (busy) return;
     busy = true;
     if (timer) { clearTimeout(timer); timer = null; }
 
-    const goingOffline = !isForcedOff();
+    const goingOffline = status.el.getAttribute("aria-pressed") === "true";
     status.set("pending");
 
     try {
-      if (goingOffline) {
-        const r = await ipc.daemonKill();
+      if (mode === "systemd") {
+        const r = goingOffline
+          ? await ipc.serviceDisable()
+          : await ipc.serviceEnable();
         if (r.ok) {
-          setForcedOff(true);
-          status.set("offline");
-          showToast("Daemon stopped", "success");
-          failures = 0;
-          schedule(HEARTBEAT_OFF_MS);
+          const on = !!(r.active && r.enabled);
+          status.set(on ? "online" : (goingOffline ? "offline" : "pending"));
+          showToast(
+            goingOffline ? "Daemon disabled (won't autostart)" : "Daemon enabled (autostarts at login)",
+            "success",
+          );
+          schedule(on ? HEARTBEAT_OK_MS : HEARTBEAT_OFF_MS);
         } else {
-          status.set("online");
-          showToast(`Stop failed: ${r.err ?? r.state}`, "error");
+          status.set(goingOffline ? "online" : "offline");
+          showToast(`systemctl: ${r.err ?? r.state ?? "failed"}`, "error");
           schedule(HEARTBEAT_OK_MS);
         }
       } else {
-        setForcedOff(false);
-        const r = await ipc.daemonRespawn();
-        applyDaemonStatus(r);
-        if (r.ok) {
-          status.set("online");
-          showToast("Daemon started", "success");
-          failures = 0;
-          schedule(HEARTBEAT_OK_MS);
+        // Legacy spawn/kill path. Used when systemd is absent.
+        if (goingOffline) {
+          const r = await ipc.daemonKill();
+          if (r.ok) {
+            setForcedOff(true);
+            status.set("offline");
+            showToast("Daemon stopped", "success");
+            failures = 0;
+            schedule(HEARTBEAT_OFF_MS);
+          } else {
+            status.set("online");
+            showToast(`Stop failed: ${r.err ?? r.state}`, "error");
+            schedule(HEARTBEAT_OK_MS);
+          }
         } else {
-          setForcedOff(true);
-          status.set("offline");
-          showToast(`Start failed: ${r.err ?? r.state}`, "error");
-          schedule(HEARTBEAT_OFF_MS);
+          setForcedOff(false);
+          const r = await ipc.daemonRespawn();
+          applyDaemonStatus(r);
+          if (r.ok) {
+            status.set("online");
+            showToast("Daemon started", "success");
+            failures = 0;
+            schedule(HEARTBEAT_OK_MS);
+          } else {
+            setForcedOff(true);
+            status.set("offline");
+            showToast(`Start failed: ${r.err ?? r.state}`, "error");
+            schedule(HEARTBEAT_OFF_MS);
+          }
         }
       }
     } catch (e) {
@@ -762,16 +904,38 @@ export async function attachHeartbeat(bar: HTMLElement): Promise<void> {
     }
   });
 
-  if (!isForcedOff()) {
+  if (mode === "spawn" && !isForcedOff()) {
     try {
       const s = await ipc.daemonStatus();
       if (!s.ok) applyDaemonStatus(s);
     } catch { /* heartbeat will own it */ }
   }
 
+  // ── Heartbeat ───────────────────────────────────────────────────────
+  // systemd mode: re-probe service state at HEARTBEAT_OK_MS / HEARTBEAT_OFF_MS
+  // so an externally-issued `systemctl --user start/stop` is reflected
+  // in the toggle within a few seconds.
+  // spawn mode: original UDS-ping + auto-respawn behaviour, unchanged.
   async function beat(): Promise<void> {
     if (busy) { schedule(HEARTBEAT_MIN_FAIL); return; }
 
+    if (mode === "systemd") {
+      const r = await ipc.serviceState().catch(() => null);
+      if (!r?.ok || !r.available) {
+        // Unit disappeared mid-session (rare — package downgrade /
+        // manual unit file removal). Fall back to spawn mode silently.
+        mode = "spawn";
+        schedule(HEARTBEAT_MIN_FAIL);
+        return;
+      }
+      const on = !!(r.active && r.enabled);
+      status.set(on ? "online" : "offline");
+      hideFatalOverlay();
+      schedule(on ? HEARTBEAT_OK_MS : HEARTBEAT_OFF_MS);
+      return;
+    }
+
+    // ── spawn mode (legacy) ──────────────────────────────────────────
     if (isForcedOff()) {
       try {
         const r = await ipc.ping();
@@ -818,7 +982,7 @@ export async function attachHeartbeat(bar: HTMLElement): Promise<void> {
     schedule(backoff);
   }
 
-  if (!isForcedOff()) {
+  if (mode === "systemd" || !isForcedOff()) {
     await beat();
   } else {
     schedule(HEARTBEAT_OFF_MS);

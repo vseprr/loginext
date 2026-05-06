@@ -41,7 +41,14 @@ let pollTimer: ReturnType<typeof setInterval> | null = null;
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
 
 const SAVE_DEBOUNCE_MS = 250;
-const ACTIVE_POLL_MS   = 3_000;
+// 3 s was chosen to keep IPC traffic minimal back when the daemon-side
+// active-window detection was the bottleneck. Now that the listener
+// publishes synchronously into the atomic `active_app_hash`, the only
+// gap is the UI's poll interval — drop it to 250 ms so the focused-app
+// row tracks at near-real-time. UDS round-trip on a local socket is
+// sub-millisecond, so the cost of 4× / second is negligible (and we
+// already skip when the document is hidden).
+const ACTIVE_POLL_MS   = 250;
 
 // ── Public API ──────────────────────────────────────────────────────
 
@@ -74,7 +81,10 @@ export function addRule(app: string, preset: string): void {
     toast(`Rule for "${app}" already exists`, "error");
     return;
   }
-  rules.push({ app, preset });
+  // New chips inherit globals (mode="", invert=null). The user can
+  // override either knob from the right-panel context-aware controls;
+  // the rule then tracks that override across reloads.
+  rules.push({ app, preset, mode: "", invert: null });
   rules.sort((a, b) => a.app.toLowerCase().localeCompare(b.app.toLowerCase()));
   renderActive();
   scheduleSave();
@@ -86,6 +96,45 @@ export function updateRule(app: string, preset: string): void {
   if (!existing) return;
   if (existing.preset === preset) return;
   existing.preset = preset;
+  renderActive();
+  scheduleSave();
+  rulesChangeCb?.(rules);
+}
+
+// Set the per-app sensitivity override. Empty string clears the
+// override (the daemon then falls back to settings.mode at lookup time).
+// Preserves mode + invert state across bind/unbind cycles by living on
+// the rule itself rather than a sidecar.
+export function setRuleMode(app: string, mode: "" | "low" | "medium" | "high"): void {
+  const existing = findRule(app);
+  if (!existing) return;
+  if ((existing.mode ?? "") === mode) return;
+  existing.mode = mode;
+  renderActive();
+  scheduleSave();
+  rulesChangeCb?.(rules);
+}
+
+// Set the per-app invert override. `null` clears the override.
+export function setRuleInvert(app: string, invert: boolean | null): void {
+  const existing = findRule(app);
+  if (!existing) return;
+  if ((existing.invert ?? null) === invert) return;
+  existing.invert = invert;
+  renderActive();
+  scheduleSave();
+  rulesChangeCb?.(rules);
+}
+
+// Clear the preset binding but keep the chip — used when the user
+// deselects the active preset while staying on the per-app context.
+// The chip remains in the context bar (so they can rebind without
+// re-focusing the app), and any per-app mode/invert overrides survive.
+export function unbindRule(app: string): void {
+  const existing = findRule(app);
+  if (!existing) return;
+  if (existing.preset === "") return;
+  existing.preset = "";
   renderActive();
   scheduleSave();
   rulesChangeCb?.(rules);

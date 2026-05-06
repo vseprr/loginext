@@ -1,5 +1,6 @@
 mod daemon;
 mod ipc_bridge;
+mod service;
 
 use std::sync::Mutex;
 
@@ -75,6 +76,7 @@ fn apply_webkit_wayland_workarounds() {
 //  terminal sees what happened, but a missing tool / dead KWin doesn't
 //  block the UI from starting.
 fn ensure_kwin_script_enabled() {
+    use std::path::{Path, PathBuf};
     use std::process::{Command, Stdio};
 
     let xdg = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
@@ -82,28 +84,102 @@ fn ensure_kwin_script_enabled() {
         return;
     }
 
-    // Step 1 — flip the enablement bit. Try the Plasma 6 tool first;
-    // fall back to Plasma 5 on hosts that haven't switched yet.
-    let mut wrote = false;
-    for tool in ["kwriteconfig6", "kwriteconfig5"] {
-        match Command::new(tool)
-            .args([
-                "--file", "kwinrc",
-                "--group", "Plugins",
-                "--key", "loginext-focusEnabled", "true",
-            ])
+    let run_silent = |tool: &str, args: &[&str]| -> bool {
+        Command::new(tool)
+            .args(args)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status()
-        {
-            Ok(s) if s.success() => {
-                wrote = true;
-                break;
-            }
-            _ => continue,
+            .map(|s| s.success())
+            .unwrap_or(false)
+    };
+
+    // Step 0 — locate a KWin script package on disk. The PKGBUILD installs
+    // it system-wide; the dev workflow leaves it in the source tree. Both
+    // are valid sources for kpackagetool6 to register from.
+    //
+    // Search order:
+    //   1. /usr/share/kwin/scripts/loginext-focus  (pacman / system)
+    //   2. ~/.local/share/kwin/scripts/loginext-focus  (already installed)
+    //   3. <UI exe>/../../../../deploy/kwin/loginext-focus  (cargo target/release)
+    //   4. <UI exe>/../../../../../deploy/kwin/loginext-focus  (cargo target/debug subdir)
+    //
+    // The walk-up loop in (3)/(4) lets `tauri dev` and a raw release-build
+    // launch find the source without an env var override.
+    let mut script_src: Option<PathBuf> = None;
+    let candidates: [PathBuf; 2] = [
+        PathBuf::from("/usr/share/kwin/scripts/loginext-focus"),
+        std::env::var("HOME")
+            .ok()
+            .map(|h| PathBuf::from(format!("{h}/.local/share/kwin/scripts/loginext-focus")))
+            .unwrap_or_default(),
+    ];
+    for c in &candidates {
+        if c.join("metadata.json").is_file() {
+            script_src = Some(c.clone());
+            break;
         }
     }
+    if script_src.is_none() {
+        if let Ok(exe) = std::env::current_exe() {
+            let mut p = exe.clone();
+            for _ in 0..7 {
+                if let Some(parent) = p.parent() {
+                    let candidate = parent.join("deploy/kwin/loginext-focus");
+                    if candidate.join("metadata.json").is_file() {
+                        script_src = Some(candidate);
+                        break;
+                    }
+                    p = parent.to_path_buf();
+                } else {
+                    break;
+                }
+            }
+        }
+    }
+
+    // Step 1 — register the script with KPackage so KWin can find it.
+    // `kpackagetool6 --upgrade` is idempotent: it overwrites a stale local
+    // copy and gracefully fails over to `--install` for first-time runs.
+    // Without this, even though the files are on disk in step 0's candidate
+    // path, KWin's plugin scanner may not see them — that's the exact bug
+    // a fresh `makepkg -si` keeps hitting on Plasma 6.
+    if let Some(src) = script_src.as_deref() {
+        let registered = register_kwin_script(src, &run_silent);
+        if !registered {
+            eprintln!(
+                "[loginext-ui] kwin: kpackagetool6 not available — \
+                 falling back to direct copy into ~/.local/share/kwin/scripts/."
+            );
+            // Direct copy is a safety net: KWin always discovers scripts
+            // in the per-user XDG directory, no kpackagetool registration
+            // required. Slower than kpackagetool6 (it does extra metadata
+            // validation) but works on hosts where Plasma's tooling isn't
+            // fully installed.
+            copy_script_to_user_dir(src);
+        }
+    } else {
+        eprintln!(
+            "[loginext-ui] kwin: focus-bridge script not found in /usr/share, \
+             ~/.local/share, or the source tree — install the package or \
+             run from the repo root."
+        );
+        return;
+    }
+
+    // Step 2 — flip the enablement bit. Try the Plasma 6 tool first;
+    // fall back to Plasma 5 on hosts that haven't switched yet.
+    let wrote = ["kwriteconfig6", "kwriteconfig5"].iter().any(|tool| {
+        run_silent(
+            tool,
+            &[
+                "--file", "kwinrc",
+                "--group", "Plugins",
+                "--key", "loginext-focusEnabled", "true",
+            ],
+        )
+    });
 
     if !wrote {
         eprintln!(
@@ -114,30 +190,57 @@ fn ensure_kwin_script_enabled() {
         return;
     }
 
-    // Step 2 — ask KWin to reload its plugin set. If KWin isn't running
-    // (headless install / SSH first-run), the call fails and is harmless;
-    // the change picks up at the next session login.
-    let mut reconfigured = false;
-    for tool in ["qdbus6", "qdbus-qt6", "qdbus"] {
-        match Command::new(tool)
-            .args(["org.kde.KWin", "/KWin", "reconfigure"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-        {
-            Ok(s) if s.success() => {
-                reconfigured = true;
-                break;
-            }
-            _ => continue,
-        }
-    }
+    // Step 3 — ask the running KWin to reload its plugin set. Harmless
+    // if KWin isn't up (SSH first-run / headless install).
+    let reconfigured = ["qdbus6", "qdbus-qt6", "qdbus"].iter().any(|tool| {
+        run_silent(tool, &["org.kde.KWin", "/KWin", "reconfigure"])
+    });
 
     eprintln!(
-        "[loginext-ui] kwin: ensured loginext-focusEnabled=true{}",
+        "[loginext-ui] kwin: focus bridge ready{}",
         if reconfigured { " (KWin reloaded)" } else { " (KWin reload skipped — log out / in to apply)" }
     );
+
+    fn register_kwin_script(src: &Path, run_silent: &dyn Fn(&str, &[&str]) -> bool) -> bool {
+        let src_str = src.to_string_lossy().into_owned();
+        for tool in ["kpackagetool6", "kpackagetool5"] {
+            // --upgrade succeeds on both fresh installs (treated as install)
+            // and existing packages (overwrites) on Plasma 6. Plasma 5's
+            // kpackagetool5 distinguishes them, so we try --install too.
+            if run_silent(tool, &["--type", "KWin/Script", "--upgrade", &src_str])
+                || run_silent(tool, &["--type", "KWin/Script", "--install", &src_str])
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn copy_script_to_user_dir(src: &Path) {
+        let Ok(home) = std::env::var("HOME") else { return };
+        let dst = PathBuf::from(format!(
+            "{home}/.local/share/kwin/scripts/loginext-focus"
+        ));
+        let Some(parent) = dst.parent() else { return };
+        let _ = std::fs::create_dir_all(parent);
+
+        // Recursive copy. The script is two files (metadata.json + a tiny
+        // main.js), so a hand-rolled walker is cheaper than pulling fs_extra.
+        fn copy_dir(from: &Path, to: &Path) {
+            let _ = std::fs::create_dir_all(to);
+            let Ok(entries) = std::fs::read_dir(from) else { return };
+            for entry in entries.flatten() {
+                let src_path = entry.path();
+                let dst_path = to.join(entry.file_name());
+                if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                    copy_dir(&src_path, &dst_path);
+                } else {
+                    let _ = std::fs::copy(&src_path, &dst_path);
+                }
+            }
+        }
+        copy_dir(src, &dst);
+    }
 }
 
 #[tauri::command]
@@ -227,6 +330,72 @@ fn kill_daemon(state: tauri::State<'_, DaemonStartup>) -> String {
     payload
 }
 
+/// Read the systemd-user state of `loginext.service`. Used by the
+/// status toggle on UI launch to set its position from the source of
+/// truth (systemd) rather than a localStorage flag, and on every
+/// heartbeat tick so an externally-issued `systemctl --user stop/start`
+/// is reflected in the UI within ~5 s.
+#[tauri::command]
+fn service_state() -> String {
+    let s = service::query_state();
+    format!(
+        r#"{{"ok":true,"available":{a},"active":{ac},"enabled":{en}}}"#,
+        a  = s.available,
+        ac = s.active,
+        en = s.enabled,
+    )
+}
+
+/// `systemctl --user enable --now loginext.service` — turn the service
+/// on AND install the autostart symlink. The frontend calls this from
+/// the DAEMON OFFLINE→ONLINE click. Errors come back verbatim so the
+/// user can act on them (missing unit file is the most common one).
+#[tauri::command]
+fn service_enable() -> String {
+    match service::enable_now() {
+        Ok(()) => {
+            // Re-query state so the UI's optimistic update matches systemd's
+            // observed state after the operation lands. If `enable --now`
+            // fails midway (e.g. ExecStart binary missing), the unit is
+            // enabled-but-failed; surfacing both flags lets the toast
+            // explain what happened rather than asserting success.
+            let s = service::query_state();
+            format!(
+                r#"{{"ok":true,"state":"enabled","available":{a},"active":{ac},"enabled":{en}}}"#,
+                a  = s.available,
+                ac = s.active,
+                en = s.enabled,
+            )
+        }
+        Err(reason) => {
+            let e = reason.replace('\\', "\\\\").replace('"', "\\\"");
+            format!(r#"{{"ok":false,"state":"enable_failed","err":"{e}"}}"#)
+        }
+    }
+}
+
+/// `systemctl --user disable --now loginext.service` — stop the service
+/// AND remove the autostart symlink. The frontend calls this from the
+/// DAEMON ONLINE→OFFLINE click.
+#[tauri::command]
+fn service_disable() -> String {
+    match service::disable_now() {
+        Ok(()) => {
+            let s = service::query_state();
+            format!(
+                r#"{{"ok":true,"state":"disabled","available":{a},"active":{ac},"enabled":{en}}}"#,
+                a  = s.available,
+                ac = s.active,
+                en = s.enabled,
+            )
+        }
+        Err(reason) => {
+            let e = reason.replace('\\', "\\\\").replace('"', "\\\"");
+            format!(r#"{{"ok":false,"state":"disable_failed","err":"{e}"}}"#)
+        }
+    }
+}
+
 /// Re-runs the spawn check on demand. The UI calls this from the status-bar
 /// reconnect path when the heartbeat reports the daemon went away while the
 /// window was open. Cheap when the socket is alive (single connect+close).
@@ -293,6 +462,9 @@ pub fn run() {
             daemon_status,
             daemon_respawn,
             kill_daemon,
+            service_state,
+            service_enable,
+            service_disable,
         ])
         .run(tauri::generate_context!());
 

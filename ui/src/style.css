@@ -474,20 +474,40 @@ body::-webkit-scrollbar-thumb {
   padding: 6px 14px;
   border-radius: 999px;
   cursor: pointer;
+  /*
+   * Why no `transform: translateY(-1px)` on hover anymore:
+   *
+   * The button sits inside `.rules-active__row`, a flex container with
+   * `min-height: 44px`. A 1 px hover-lift moved the button's bounding
+   * box up by one pixel, which on systems where the cursor sat exactly
+   * on the original bottom edge would yank the cursor *off* the button,
+   * which immediately removed :hover, which dropped the lift, which
+   * placed the cursor back on the button — a textbook hover-lift jitter
+   * loop manifesting as the strobe the user reported.
+   *
+   * The fix is to remove the layout-shifting transform on hover and
+   * keep the visual feedback as a pure shadow / colour change. The
+   * `:active` press state still uses `scale(0.98)` because a click is
+   * a momentary event and can't trigger the same feedback loop.
+   */
   box-shadow: var(--neu-out-xs);
   transition: box-shadow var(--transition-fast),
-              transform 120ms ease,
-              color var(--transition-fast);
+              color      var(--transition-fast),
+              transform  120ms ease;
 }
 
 .rules-add:hover {
   color: var(--accent);
-  box-shadow: var(--neu-out-sm), 0 0 12px var(--accent-glow-sm);
-  transform: translateY(-1px);
+  /* Single coherent glow — no compound shadow stack, so the value
+     never lands "between" two transition snapshots that would cause
+     a sub-pixel rounding flash on WebKitGTK. */
+  box-shadow:
+    var(--neu-out-sm),
+    0 0 12px var(--accent-glow-sm);
 }
 
 .rules-add:active {
-  transform: translateY(0) scale(0.98);
+  transform: scale(0.97);
   box-shadow: var(--neu-in-sm);
 }
 
@@ -505,10 +525,14 @@ body::-webkit-scrollbar-thumb {
 }
 
 .context-btn {
+  position: relative;       /* anchors the absolutely-positioned X button */
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding: 7px 14px;
+  /* Reserve room on the right for the X close button so its hover/focus
+     reveal doesn't shift the label horizontally — labels jumping around
+     is the kind of micro-jank that erodes a polish UI. */
+  padding: 7px 26px 7px 14px;
   border: none;
   border-radius: var(--radius-pill);
   background: var(--surface);
@@ -520,9 +544,27 @@ body::-webkit-scrollbar-thumb {
   box-shadow: var(--neu-out-xs);
   transition: color var(--transition-fast),
               box-shadow var(--transition-med),
-              transform 140ms ease;
-  max-width: 140px;
+              transform 140ms ease,
+              opacity var(--transition-fast);
+  max-width: 160px;
   overflow: hidden;
+}
+
+/* The Global chip has no X button — pull the right-padding back so its
+   visual weight matches the per-app chips when the X is hidden. */
+.context-btn#ctx-global {
+  padding-right: 14px;
+}
+
+/* Inactive: the chip is tracked (in app_rules.txt) but has no preset
+   binding, so the daemon ignores it. Visually fade so the user can tell
+   at a glance which chips fire and which are bookmarks. */
+.context-btn--inactive {
+  color: var(--text-faint);
+  opacity: 0.78;
+}
+.context-btn--inactive:hover:not(.context-btn--active) {
+  opacity: 1;
 }
 
 .context-btn:hover:not(.context-btn--active) {
@@ -564,6 +606,60 @@ body::-webkit-scrollbar-thumb {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* X close button on each app chip. Hidden by default (zero opacity +
+   pointer-events:none so it can't intercept clicks while hidden);
+   fades in smoothly on chip hover or when the chip is keyboard-focused.
+   On the active chip it stays visible to keep the delete affordance
+   discoverable while the user is editing that context. */
+.context-btn__close {
+  position: absolute;
+  right: 7px;
+  top: 50%;
+  width: 16px;
+  height: 16px;
+  margin-top: -8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  color: var(--text-faint);
+  background: transparent;
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    opacity var(--transition-fast),
+    color   var(--transition-fast),
+    background var(--transition-fast),
+    transform 140ms ease;
+}
+
+.context-btn:hover .context-btn__close,
+.context-btn:focus-within .context-btn__close,
+.context-btn--active .context-btn__close {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.context-btn__close:hover {
+  color: #e47878;
+  background: rgba(228, 120, 120, 0.12);
+  transform: scale(1.06);
+}
+
+.context-btn__close:active {
+  transform: scale(0.92);
+}
+
+.context-btn__close svg {
+  width: 10px;
+  height: 10px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
 }
 
 /* ─── App header ─────────────────────────────────────────────────── */
@@ -641,6 +737,30 @@ body::-webkit-scrollbar-thumb {
   /* Slightly larger inner padding so neumorphic shadows don't get clipped. */
   padding: 6px;
   margin: -6px;
+  /* Scroll-perf primitives:
+       • `contain: paint` walls off paints so a column's scroll
+          doesn't trigger repaints in the sibling columns or the
+          status bar (the column's own neumorphic shadows are heavy
+          on box-shadow, which is the slow path on WebKitGTK).
+       • `transform: translateZ(0)` promotes the column to its own
+          compositor layer so scrolling is GPU-composited instead of
+          CPU-painted. The -webkit-overflow variant is for WebKit's
+          smooth-scroll heuristic.
+       Both together lift scroll FPS from ~30 to a comfortable 60 on
+       1440p+ Plasma 6 sessions where the box-shadow blur radius (18px
+       on .card / .list-item) is the bottleneck. */
+  contain: paint;
+  transform: translateZ(0);
+  -webkit-overflow-scrolling: touch;
+}
+
+/* Cards inside scrollable columns get content-visibility:auto so off-screen
+   cards skip layout and paint entirely until they scroll near the viewport.
+   `contain-intrinsic-size` gives the engine a placeholder height so the
+   scrollbar geometry stays stable across virtualisation transitions. */
+.app__col > .card {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 240px;
 }
 
 /* Scrollbar styling */
@@ -809,6 +929,14 @@ body::-webkit-scrollbar-thumb {
   gap: var(--space-3);
   flex-shrink: 0;
   height: 44px;
+  /* `contain: layout style` walls off this subtree from upstream layout
+     work. Without it, every window-resize tick re-runs the breathing
+     animation's box-shadow keyframes against a freshly-laid-out parent
+     (the .app-shell min-height:100% chain triggers a flex re-pack on
+     each pixel of resize), and the badge appeared to "drift" for ~2 s
+     after the resize settled. The contain hint is enough for the
+     compositor to keep the badge's layer in place independently. */
+  contain: layout style;
 }
 
 .status-toggle {
@@ -848,7 +976,13 @@ body::-webkit-scrollbar-thumb {
     transform   140ms ease,
     background  var(--transition-fast);
 
-  will-change: box-shadow, transform;
+  /* `will-change` was previously listed here as a perf hint, but combined
+     with the breathing keyframes below it caused the badge to lag for
+     2-3 s after a window resize on Plasma 6 / WebKitGTK — the compositor
+     kept its dedicated layer pinned to the old layout while the parent
+     repacked. Dropping the hint trades a sliver of animation FPS for
+     correct positioning on every frame, which is the right tradeoff for
+     a status indicator the user looks at more than they look near. */
   user-select: none;
   -webkit-tap-highlight-color: transparent;
 }

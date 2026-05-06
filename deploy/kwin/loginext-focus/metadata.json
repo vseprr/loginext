@@ -15,7 +15,7 @@
         "ServiceTypes": [
             "KWin/Script"
         ],
-        "Version": "1"
+        "Version": "2"
     },
     "X-Plasma-API": "javascript",
     "X-Plasma-MainScript": "code/main.js"

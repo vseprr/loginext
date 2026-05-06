@@ -94,12 +94,24 @@ pub fn write_config(sensitivity: &str, invert_hwheel: bool, active_preset: &str)
 
 /// One rule entry. `app` is the FNV-1a-hashed lookup key — the X11 instance
 /// name, Hyprland class, KWin resourceName, or KWin resourceClass — exactly
-/// as the daemon's listener publishes it. `preset` is one of the daemon's
-/// `list_presets` ids (currently `tab_nav` or `zoom`).
-#[derive(serde::Deserialize, serde::Serialize, Clone)]
+/// as the daemon's listener publishes it.
+///
+/// `preset` is one of the daemon's `list_presets` ids (currently `tab_nav`
+/// / `zoom` / `none`), or empty for a "tracked but inactive" chip the UI
+/// keeps visible without affecting daemon behaviour.
+///
+/// `mode` and `invert` carry per-app sensitivity / invert overrides. Empty
+/// `mode` means "use settings.mode"; `invert` is a tri-state (`Some(true)`
+/// / `Some(false)` / `None` = inherit).
+#[derive(serde::Deserialize, serde::Serialize, Clone, Default)]
 pub struct AppRuleEntry {
     pub app: String,
+    #[serde(default)]
     pub preset: String,
+    #[serde(default)]
+    pub mode: String,                  // "" | "low" | "medium" | "high"
+    #[serde(default)]
+    pub invert: Option<bool>,          // None = inherit
 }
 
 fn rules_path() -> PathBuf {
@@ -124,30 +136,50 @@ pub fn read_app_rules() -> String {
             continue;
         }
         // Split on the FIRST '=' only — the app side is allowed to contain
-        // anything except '=' itself, and we want to be forgiving about
-        // trailing whitespace + comments on the value side. The daemon's
-        // loader uses the same split.
+        // anything except '=' itself. Right of the '=' is a CSV with up to
+        // three optional fields: preset, mode, invert. Empty fields mean
+        // "inherit from globals". An empty preset on a non-empty rule line
+        // (e.g. `code=`) means "tracked-only chip" — the UI keeps it
+        // visible so the user can re-bind a preset later.
         let Some(eq) = line.find('=') else { continue };
         let app = line[..eq].trim().to_string();
-        let preset = line[eq + 1..].trim().to_string();
-        if app.is_empty() || preset.is_empty() {
+        if app.is_empty() {
             continue;
         }
-        entries.push(AppRuleEntry { app, preset });
+        let value = &line[eq + 1..];
+        let mut fields = value.splitn(3, ',');
+        let preset = fields.next().unwrap_or("").trim().to_string();
+        let mode   = fields.next().unwrap_or("").trim().to_string();
+        let invert_s = fields.next().unwrap_or("").trim();
+        let invert = match invert_s {
+            ""              => None,
+            "true"  | "1"   => Some(true),
+            "false" | "0"   => Some(false),
+            _               => None,  // unknown → inherit
+        };
+        entries.push(AppRuleEntry { app, preset, mode, invert });
     }
 
     // Build the JSON manually — the existing write_config and dispatch.cpp
     // outputs do the same thing. Avoids pulling serde_json into the build
-    // for a structure this trivial.
+    // for a structure this trivial. `invert` is encoded as `true` / `false`
+    // / `null` so the UI's tri-state read is unambiguous.
     let mut out = String::from("{\"ok\":true,\"rules\":[");
     for (i, e) in entries.iter().enumerate() {
         if i > 0 {
             out.push(',');
         }
+        let invert_field = match e.invert {
+            Some(true)  => "true",
+            Some(false) => "false",
+            None        => "null",
+        };
         out.push_str(&format!(
-            "{{\"app\":\"{}\",\"preset\":\"{}\"}}",
+            "{{\"app\":\"{}\",\"preset\":\"{}\",\"mode\":\"{}\",\"invert\":{}}}",
             json_escape(&e.app),
-            json_escape(&e.preset)
+            json_escape(&e.preset),
+            json_escape(&e.mode),
+            invert_field
         ));
     }
     out.push_str("]}");
@@ -164,34 +196,58 @@ pub fn write_app_rules(rules: &[AppRuleEntry]) -> Result<(), String> {
         if r.app.is_empty() {
             return Err("rule has empty app id".into());
         }
-        if r.preset.is_empty() {
-            return Err(format!("rule '{}' has empty preset", r.app));
-        }
-        if r.app.contains('=') || r.app.contains('\n') || r.app.contains('\r') {
-            return Err(format!(
-                "app id '{}' contains '=' or newline (would corrupt the file)",
-                r.app
-            ));
-        }
-        if r.preset.contains('=') || r.preset.contains('\n') || r.preset.contains('\r') {
-            return Err(format!(
-                "preset '{}' contains '=' or newline",
-                r.preset
-            ));
+        // Empty preset is now legal — it means "tracked-only chip" (the
+        // user can re-bind later). The mode + invert overrides are still
+        // serialised even on tracked-only chips so they survive across
+        // bind/unbind cycles without losing state.
+        for (field, name) in [
+            (&r.app,    "app id"),
+            (&r.preset, "preset"),
+            (&r.mode,   "mode"),
+        ] {
+            if field.contains('=') || field.contains(',')
+                || field.contains('\n') || field.contains('\r')
+            {
+                return Err(format!(
+                    "{} '{}' contains '=', ',', or newline (would corrupt the file)",
+                    name, field
+                ));
+            }
         }
     }
 
     let dir = config_dir();
     std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {e}"))?;
 
-    let mut body = String::with_capacity(64 + rules.len() * 32);
+    let mut body = String::with_capacity(64 + rules.len() * 48);
     body.push_str("# LogiNext — per-application preset overrides.\n");
     body.push_str("# Generated by the UI; manual edits survive but the next save overwrites them.\n");
-    body.push_str("# Format: <app_id>=<preset_id>. See src/scope/rules_loader.cpp for parsing rules.\n\n");
+    body.push_str("# Format: <app_id>=<preset>[,<mode>[,<invert>]]\n");
+    body.push_str("#   preset:  tab_nav | zoom | none | (empty = tracked-only chip)\n");
+    body.push_str("#   mode:    low | medium | high | (empty = inherit global)\n");
+    body.push_str("#   invert:  true | false | (empty = inherit global)\n");
+    body.push_str("# See src/scope/rules_loader.cpp for parsing rules.\n\n");
     for r in rules {
         body.push_str(&r.app);
         body.push('=');
         body.push_str(&r.preset);
+        // Always emit mode + invert columns when either is non-default —
+        // keeps round-trip stable. We also emit an empty trailing field
+        // when only `mode` is set so the parser can position fields by
+        // index without ambiguity.
+        let invert_s = match r.invert {
+            Some(true)  => "true",
+            Some(false) => "false",
+            None        => "",
+        };
+        if !r.mode.is_empty() || !invert_s.is_empty() {
+            body.push(',');
+            body.push_str(&r.mode);
+            if !invert_s.is_empty() {
+                body.push(',');
+                body.push_str(invert_s);
+            }
+        }
         body.push('\n');
     }
 

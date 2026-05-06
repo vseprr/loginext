@@ -31,7 +31,11 @@ Type=simple
 # --quiet routes only Warn/Error to stderr; full Trace/Debug is in
 # $XDG_STATE_HOME/loginext/daemon.log. Drop --quiet if you want journald to
 # capture the same Info-level events as the file log.
-ExecStart=/usr/local/bin/loginext --quiet
+#
+# Default points at the pacman-installed path (/usr/bin/loginext from the
+# PKGBUILD). install.sh rewrites this line to ~/.local/bin/loginext when
+# building the per-user unit, so a single source file feeds both deploys.
+ExecStart=/usr/bin/loginext --quiet
 
 # SIGHUP triggers an in-place config reload (no restart, no event-loop drop).
 ExecReload=/bin/kill -HUP $MAINPID

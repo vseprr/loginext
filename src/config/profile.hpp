@@ -5,9 +5,14 @@
 namespace loginext::config {
 
 enum class SensitivityMode : uint8_t {
-    Low,
-    Medium,
-    High,
+    Low     = 0,
+    Medium  = 1,
+    High    = 2,
+    // Sentinel used by AppRule to mean "no per-app override; resolve to
+    // settings.mode at lookup time". Never reaches profile_for() — the
+    // hot path checks for Inherit and substitutes the global mode before
+    // resolving the Profile reference.
+    Inherit = 255,
 };
 
 struct Profile {
@@ -79,8 +84,9 @@ constexpr const Profile& profile_for(SensitivityMode m) noexcept {
         case SensitivityMode::Low:    return profile_low;
         case SensitivityMode::Medium: return profile_medium;
         case SensitivityMode::High:   return profile_high;
+        case SensitivityMode::Inherit: break;  // caller must resolve before this point
     }
-    return profile_low;
+    return profile_medium;
 }
 
 constexpr const char* mode_name(SensitivityMode m) noexcept {
@@ -88,8 +94,27 @@ constexpr const char* mode_name(SensitivityMode m) noexcept {
         case SensitivityMode::Low:    return "low";
         case SensitivityMode::Medium: return "medium";
         case SensitivityMode::High:   return "high";
+        case SensitivityMode::Inherit: return "";
     }
-    return "low";
+    return "medium";
+}
+
+// Parse a sensitivity mode from its string form. Empty input maps to
+// Inherit so per-app rules with no mode override round-trip cleanly.
+// Used by the app_rules.txt loader and IPC command parser.
+constexpr bool mode_from_str(const char* s, std::size_t n,
+                             SensitivityMode& out) noexcept {
+    auto eq = [&](const char* lit) noexcept {
+        std::size_t i = 0;
+        while (i < n && lit[i] != '\0' && lit[i] == s[i]) ++i;
+        return i == n && lit[i] == '\0';
+    };
+    if (n == 0)         { out = SensitivityMode::Inherit; return true; }
+    if (eq("low"))      { out = SensitivityMode::Low;     return true; }
+    if (eq("medium"))   { out = SensitivityMode::Medium;  return true; }
+    if (eq("high"))     { out = SensitivityMode::High;    return true; }
+    if (eq("inherit"))  { out = SensitivityMode::Inherit; return true; }
+    return false;
 }
 
 } // namespace loginext::config

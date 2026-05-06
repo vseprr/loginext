@@ -58,11 +58,21 @@ export interface PresetsResponse extends IpcOk {
 
 // Per-app rule entry. `app` is the lookup key (X11 instance, Hyprland class,
 // KWin resourceName/Class) — case-insensitive on the daemon side because the
-// FNV-1a hash lower-cases ASCII before mixing. `preset` is one of the ids
-// returned by `list_presets`.
+// FNV-1a hash lower-cases ASCII before mixing.
+//
+// `preset` is one of the ids returned by `list_presets`, or `""` for a
+// "tracked-only" chip (UI-visible context entry with no daemon-side rule).
+//
+// `mode` and `invert` carry per-app overrides for the global sensitivity /
+// invert axis settings. Empty `mode` and `null` `invert` mean "inherit the
+// global value at the moment of resolution" — the daemon does the lookup
+// every event, so changing the global propagates to inheriting rules
+// without a re-save.
 export interface AppRule {
   app: string;
   preset: string;
+  mode?: "" | "low" | "medium" | "high";   // "" = inherit
+  invert?: boolean | null;                  // null = inherit
 }
 
 export interface AppRulesResponse extends IpcOk {
@@ -75,6 +85,8 @@ export interface AppRulesResponse extends IpcOk {
 // ("kwin-dbus" / "x11" / "hyprland" / "kde-wayland" / "none").
 // `rule_matched` distinguishes "the per-app rule fired" from "fell back to
 // the global preset", which the UI surfaces in the focused-app row.
+// `mode` and `invert` are the *effective* values after per-app override,
+// useful for the UI to show what the daemon will apply right now.
 export interface ActiveAppResponse extends IpcOk {
   hash: string;            // "0x9de02622" — purely informational
   name: string;
@@ -82,6 +94,8 @@ export interface ActiveAppResponse extends IpcOk {
   preset: string;          // effective preset (after per-app override)
   global_preset: string;   // current Settings::active_preset
   rule_matched: boolean;
+  mode: "low" | "medium" | "high";
+  invert: boolean;
 }
 
 export async function request(cmd: string, extra: Record<string, unknown> = {}): Promise<IpcResult> {
@@ -162,6 +176,31 @@ async function invokeDaemon(
   }
 }
 
+// systemd-user service envelope. `available=false` means the unit file
+// isn't installed at all (the toast tells the user to run install.sh or
+// reinstall the package). Otherwise the toggle reads `active && enabled`
+// to decide its position — both bits matter so a manually-stopped unit
+// (active=false, enabled=true) renders as OFF rather than mid-state.
+export interface ServiceState {
+  ok: boolean;
+  available?: boolean;
+  active?: boolean;
+  enabled?: boolean;
+  state?: "enabled" | "disabled" | "enable_failed" | "disable_failed";
+  err?: string;
+}
+
+async function invokeService(
+  cmd: "service_state" | "service_enable" | "service_disable",
+): Promise<ServiceState> {
+  const raw = await invoke<string>(cmd);
+  try {
+    return JSON.parse(raw) as ServiceState;
+  } catch {
+    return { ok: false, err: "bad_response" };
+  }
+}
+
 export const ipc = {
   ping:          () => request("ping"),
   getSettings:   () => request("get_settings") as Promise<SettingsResponse | IpcErr>,
@@ -178,4 +217,8 @@ export const ipc = {
   daemonStatus:  () => invokeDaemon("daemon_status"),
   daemonRespawn: () => invokeDaemon("daemon_respawn"),
   daemonKill:    () => invokeDaemon("kill_daemon"),
+  // systemd --user service control (drives the DAEMON ONLINE/OFFLINE toggle).
+  serviceState:   () => invokeService("service_state"),
+  serviceEnable:  () => invokeService("service_enable"),
+  serviceDisable: () => invokeService("service_disable"),
 };

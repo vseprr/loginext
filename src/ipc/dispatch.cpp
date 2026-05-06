@@ -159,13 +159,21 @@ int handle_get_active_app(char* resp, size_t cap, DispatchCtx* dc) noexcept {
         std::strncpy(source, "none", sizeof(source) - 1);
     }
 
-    loginext::presets::PresetId effective = dc->settings->active_preset;
-    bool matched = false;
+    loginext::presets::PresetId       effective_preset  = dc->settings->active_preset;
+    loginext::config::SensitivityMode effective_mode    = dc->settings->mode;
+    bool                              effective_invert  = dc->settings->invert_hwheel;
+    bool                              matched           = false;
     if (dc->rules) {
-        loginext::presets::PresetId override_id;
-        if (loginext::scope::lookup(*dc->rules, hash, override_id)) {
-            effective = override_id;
-            matched   = true;
+        loginext::scope::AppRule rule;
+        if (loginext::scope::lookup(*dc->rules, hash, rule)) {
+            effective_preset = rule.preset;
+            if (rule.mode != loginext::config::SensitivityMode::Inherit) {
+                effective_mode = rule.mode;
+            }
+            if (rule.invert != loginext::scope::invert_inherit) {
+                effective_invert = (rule.invert == loginext::scope::invert_on);
+            }
+            matched = true;
         }
     }
 
@@ -176,13 +184,16 @@ int handle_get_active_app(char* resp, size_t cap, DispatchCtx* dc) noexcept {
 
     int n = std::snprintf(resp, cap,
         "{\"ok\":true,\"hash\":\"0x%08x\",\"name\":\"%s\",\"source\":\"%s\","
-        "\"preset\":\"%s\",\"global_preset\":\"%s\",\"rule_matched\":%s}",
+        "\"preset\":\"%s\",\"global_preset\":\"%s\",\"rule_matched\":%s,"
+        "\"mode\":\"%s\",\"invert\":%s}",
         hash,
         name_esc,
         src_esc,
-        loginext::presets::preset_id_str(effective),
+        loginext::presets::preset_id_str(effective_preset),
         loginext::presets::preset_id_str(dc->settings->active_preset),
-        matched ? "true" : "false");
+        matched ? "true" : "false",
+        loginext::config::mode_name(effective_mode),
+        effective_invert ? "true" : "false");
     return (n > 0 && static_cast<size_t>(n) < cap) ? n : -1;
 }
 

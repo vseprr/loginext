@@ -60,42 +60,59 @@ void on_event(const input_event& ev, void* ctx) {
 
     if (ev.type == EV_REL && ev.code == REL_HWHEEL) {
 
-        // Per-app scope: resolve the effective preset BEFORE running
-        // heuristics so we can short-circuit to raw passthrough when the
-        // preset is None (unbound).
+        // Per-app scope: resolve effective preset, sensitivity profile,
+        // and invert flag BEFORE running heuristics so the passthrough
+        // branch can short-circuit and the heuristic uses the right
+        // profile timings. AppRule wins on every field where it has a
+        // non-inherit override; otherwise we fall back to settings.
         uint32_t app_hash = app->scope.active_app_hash.load(
             std::memory_order_relaxed);
-        loginext::presets::PresetId effective = app->settings.active_preset;
-        loginext::presets::PresetId override_id;
-        if (loginext::scope::lookup(app->rules, app_hash, override_id)) {
-            effective = override_id;
+        loginext::presets::PresetId       effective_preset = app->settings.active_preset;
+        const loginext::config::Profile*  effective_profile = &app->settings.profile;
+        bool                              effective_invert  = app->settings.invert_hwheel;
+
+        loginext::scope::AppRule rule;
+        if (loginext::scope::lookup(app->rules, app_hash, rule)) {
+            effective_preset = rule.preset;
+            if (rule.mode != loginext::config::SensitivityMode::Inherit) {
+                effective_profile = &loginext::config::profile_for(rule.mode);
+            }
+            if (rule.invert != loginext::scope::invert_inherit) {
+                effective_invert = (rule.invert == loginext::scope::invert_on);
+            }
         }
 
-        // Passthrough: no preset bound → forward raw HWHEEL as-is so
-        // the wheel behaves as a normal unmapped input device.
-        if (effective == loginext::presets::PresetId::None) {
+        // Passthrough: explicit None preset (global or per-app) → forward
+        // raw HWHEEL as-is so the wheel behaves as a normal unmapped
+        // input device.
+        if (effective_preset == loginext::presets::PresetId::None) {
             loginext::core::emit_passthrough(app->emitter, ev);
             return;
         }
 
-        loginext::heuristics::tick_leak(app->scroll, ts, app->settings.profile);
+        loginext::heuristics::tick_leak(app->scroll, ts, *effective_profile);
 
-        int32_t value = app->settings.invert_hwheel ? -ev.value : ev.value;
+        int32_t value = effective_invert ? -ev.value : ev.value;
         auto dir = loginext::heuristics::process_hwheel(app->scroll, value, ts,
-                                                        app->settings.profile);
+                                                        *effective_profile);
         if (dir != loginext::heuristics::Direction::None) {
             // Resolve the logical tick under the effective preset. The
             // heuristic engine never sees this dispatch; the preset table is
             // constexpr and the lookup is a single switch.
-            const auto combo = loginext::presets::resolve(effective, dir);
+            const auto combo = loginext::presets::resolve(effective_preset, dir);
             // Per-emit traces are file-only — would otherwise spam the
             // interactive terminal during normal scrolling. Logs the
             // *effective* preset (after per-app override) so the trace
             // matches what actually gets emitted; logging active_preset
             // here would silently mask per-app rule resolution bugs.
-            LX_TRACE("emit dir=%s preset=%s app_hash=0x%08x",
+            LX_TRACE("emit dir=%s preset=%s mode=%s invert=%s app_hash=0x%08x",
                      dir == loginext::heuristics::Direction::Right ? "right" : "left",
-                     loginext::presets::preset_id_str(effective),
+                     loginext::presets::preset_id_str(effective_preset),
+                     loginext::config::mode_name(
+                         effective_profile == &loginext::config::profile_low    ? loginext::config::SensitivityMode::Low :
+                         effective_profile == &loginext::config::profile_high   ? loginext::config::SensitivityMode::High :
+                                                                                   loginext::config::SensitivityMode::Medium),
+                     effective_invert ? "true" : "false",
                      app_hash);
             loginext::core::enqueue_combo(app->pacer, combo, ts);
         }

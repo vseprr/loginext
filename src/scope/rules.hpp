@@ -1,5 +1,6 @@
 #pragma once
 
+#include "config/profile.hpp"
 #include "presets/preset.hpp"
 
 #include <cstddef>
@@ -7,7 +8,7 @@
 
 namespace loginext::scope {
 
-// Fixed-capacity, open-addressing hash table of (app_hash → PresetId).
+// Fixed-capacity, open-addressing hash table of (app_hash → AppRule).
 // Capacity is a power of two so the index step is a mask, not a mod.
 // All hot-path lookups are pure integer arithmetic — no allocation, no
 // string compare, no STL container.
@@ -19,9 +20,22 @@ constexpr std::size_t rule_capacity = 64;
 static_assert((rule_capacity & (rule_capacity - 1)) == 0,
               "rule_capacity must be a power of two");
 
+// Tri-state invert override. Stored as an int8_t for compactness — the
+// AppRule's hot-path footprint stays at 8 bytes (uint32 + 1 + 1 + 1 + 1
+// padding). The value is read on every HWHEEL event when a rule matches,
+// so keeping it in cache is worth the ergonomics tax.
+//   -1 → inherit settings.invert_hwheel
+//    0 → forced off
+//    1 → forced on
+constexpr int8_t invert_inherit = -1;
+constexpr int8_t invert_off     = 0;
+constexpr int8_t invert_on      = 1;
+
 struct AppRule {
-    uint32_t          app_hash;   // 0 = empty slot
-    presets::PresetId preset;
+    uint32_t                app_hash;   // 0 = empty slot
+    presets::PresetId       preset;     // PresetId::None = passthrough for this app
+    config::SensitivityMode mode;       // Inherit = use settings.mode
+    int8_t                  invert;     // see constants above
 };
 
 struct RuleTable {
@@ -34,14 +48,18 @@ void clear(RuleTable& t) noexcept;
 
 // Insert or overwrite. Returns false if the table is full or `app_hash` is 0
 // (the global sentinel). Safe only off the hot path (load / reload).
-bool insert(RuleTable& t, uint32_t app_hash, presets::PresetId p) noexcept;
+bool insert(RuleTable& t,
+            uint32_t app_hash,
+            presets::PresetId preset,
+            config::SensitivityMode mode = config::SensitivityMode::Inherit,
+            int8_t invert = invert_inherit) noexcept;
 
 // O(1) hot-path lookup. Returns true iff a rule exists for this hash;
-// `out` receives the preset on hit and is left untouched on miss.
+// `out` receives the full rule on hit and is left untouched on miss.
 // noexcept + `inline` so the compiler can fold this into the on_event path.
 [[nodiscard]] inline bool lookup(const RuleTable& t,
                                  uint32_t app_hash,
-                                 presets::PresetId& out) noexcept {
+                                 AppRule& out) noexcept {
     if (app_hash == 0) return false;            // global sentinel short-circuit
     std::size_t mask = rule_capacity - 1;
     std::size_t i    = app_hash & mask;
@@ -50,7 +68,7 @@ bool insert(RuleTable& t, uint32_t app_hash, presets::PresetId p) noexcept;
     for (std::size_t step = 0; step < rule_capacity; ++step) {
         const AppRule& r = t.slots[(i + step) & mask];
         if (r.app_hash == 0)        return false;       // empty → terminate
-        if (r.app_hash == app_hash) { out = r.preset; return true; }
+        if (r.app_hash == app_hash) { out = r; return true; }
     }
     return false;
 }
