@@ -10,11 +10,25 @@ This file is the **roadmap**. For user-visible release history see [CHANGELOG.md
 
 | Phase | Theme | State |
 |---|---|---|
-| 1 | Thumb-wheel engine — gesture-aware tab switching, sensitivity profiles, hot reload, `uinput` virtual mouse + keyboard | ✅ Shipped |
-| 2 | Daemon IPC, Tauri UI, per-app rules with sensitivity/invert overrides, KWin DBus focus bridge, udev unprivileged access, systemd-driven lifecycle, packaging | ✅ Stable |
+| 1 | Thumb-wheel engine — gesture-aware tab switching, sensitivity profiles, hot reload, `uinput` virtual mouse + keyboard | ✅ COMPLETED — v1.0.0 |
+| 2 | Daemon IPC (`RuntimeDirectory`-managed UDS), Tauri UI, per-app rules with sensitivity/invert overrides, KWin DBus focus bridge with cold-boot bootstrap, udev unprivileged access, systemd-driven lifecycle (template v8 with cgroup ceilings + oomd hints), packaging (`install.sh` + Arch `PKGBUILD`) | ✅ COMPLETED — v1.0.0 |
 | 3 | Other MX Master 3S controls (Back/Forward, Gesture, Mode-shift, vertical wheel) + new preset families (volume, custom keystroke, run command) | 🚧 Planned |
 
-The daemon and UI are production-ready for the thumb-wheel use case. Phase 3 expands the control surface; the lifecycle, scope, and rule engine that land it are already in place from Phase 2.
+v1.0.0 ships the daemon and UI as production-ready for the thumb-wheel use case on Plasma 6 / CachyOS. Phase 3 expands the control surface; the lifecycle, scope, rule engine, listener-thread CPU posture, and cold-boot race fixes that land it are already in place from Phase 2.
+
+### v1.0.0 closeout — what landed in the final cycle
+
+- [x] Listener-thread CPU spinner fixed (the 30-second `select(timeout=0)` busy-loop in `kwin_dbus_loop`'s diagnostic-deadline math). Idle daemon: ~40 ms CPU per minute, down from ~30 s of CPU per minute.
+- [x] Cold-boot rule activation works without the UI being launched. Direct `org.kde.KWin.NameHasOwner` / `wayland-N` socket / `xcb_connect` probes replaced the env-var gates that the systemd-user / Plasma session-env import race made unusable. 30 × 2 s polling loop catches up the moment a compositor surfaces.
+- [x] Cold-boot KWin bootstrap. After the listener binds `org.loginext.WindowFocus`, an inline one-shot KWin script is loaded via `org.kde.kwin.Scripting.loadScript` + `Script.run` to push the active window directly to our `Activated` handler — bypassing the persistent `loginext-focus` script if it isn't enabled in `kwinrc`. Falls back to `org.kde.KWin.reconfigure` if `loadScript` is rejected.
+- [x] Bounded udev grace window inside `find_device()` (10 × 2 s) so a slow-enumerating `/dev/input/event*` at cold boot doesn't burn through `StartLimitBurst`. Unit's `RestartSec` bumped to 15 s and `StartLimitIntervalSec` to 120 s in lockstep.
+- [x] Cgroup resource ceilings in the unit (`MemoryHigh=32M`, `MemoryMax=64M`, `TasksMax=32`, `CPUQuota=50%`) plus `ManagedOOMPreference=avoid` / `ManagedOOMMemoryPressure=kill` / `ManagedOOMSwap=kill`. Caps damage if the pacer state machine ever wedges and tells systemd-oomd to kill other cgroups first under PSI pressure.
+- [x] Secure IPC socket via `RuntimeDirectory=loginext` + `RuntimeDirectoryMode=0700`. Socket lives at `$XDG_RUNTIME_DIR/loginext/loginext.sock`; systemd creates the directory before exec and tears it down on stop. Stale sockets across crashes are no longer possible.
+- [x] IPC bring-up moved BEFORE the device retry loop. The UI's 5-second socket-existence probe now passes immediately, even when the daemon is mid-retry on a slow-enumerating receiver.
+- [x] `--debug-perf` CLI flag for per-second wakeup / event / sd_bus_process counters. Was the diagnostic that exposed the listener spinner; left in for future regressions.
+- [x] Tauri `bundle.targets` set to `["deb"]` so `npm run tauri build` no longer fails on the AppImage bundler's 512 × 512 square-icon validation.
+- [x] `install.sh` enables the systemd unit by default; pass `--no-enable` for headless / debugging setups.
+- [x] Versions bumped to 1.0.0 across `tauri.conf.json` and `ui/package.json`.
 
 ---
 

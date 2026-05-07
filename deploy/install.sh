@@ -34,17 +34,26 @@ warn()  { printf "${c_yellow}  !${c_off} %s\n" "$*"; }
 die()   { printf "${c_red}  ✗ %s${c_off}\n" "$*" >&2; exit 1; }
 
 # ---- enable_service flag ----------------------------------------------------
-ENABLE_SERVICE=0
+# v1.0.0 default: enable + start loginext.service so the daemon comes up at
+# every login and survives reboots without the user having to open the UI
+# first. Pass --no-enable to keep the unit installed but inactive — useful
+# for headless / debugging setups where you want manual `systemctl --user
+# start` control.
+ENABLE_SERVICE=1
 for arg in "$@"; do
     case "$arg" in
-        --enable-service) ENABLE_SERVICE=1 ;;
+        --enable-service) ENABLE_SERVICE=1 ;;          # accepted for back-compat
+        --no-enable)      ENABLE_SERVICE=0 ;;
         -h|--help)
             cat <<EOF
-Usage: deploy/install.sh [--enable-service]
+Usage: deploy/install.sh [--no-enable]
 
-  --enable-service   After install, enable + start loginext.service as a
-                     systemd --user unit. Off by default — the UI spawns the
-                     daemon on demand and that is the recommended workflow.
+  (default)         Build + install the daemon and UI, then enable+start
+                    loginext.service as a systemd --user unit. The daemon
+                    auto-starts at every login from now on.
+  --no-enable       Skip the systemd enable+start step. The unit file is
+                    still installed; bring it up manually with
+                    'systemctl --user enable --now loginext.service'.
 EOF
             exit 0
             ;;
@@ -86,10 +95,16 @@ ok "daemon built"
 # (AppImage wants a square icon, and we install via .desktop instead). If the
 # bundler still trips on something cosmetic, tolerate it: the binary is what
 # we care about, and we re-check its presence below.
+#
+# `npm run tauri:build` (composite script in package.json) runs `vite build`
+# explicitly before invoking tauri. Tauri's own `beforeBuildCommand` would
+# do the same, but routing through the composite makes the Vite step
+# visible in build logs and gives `install.sh` a single canonical command
+# matching the developer-facing instructions in ui/src-tauri/README.md.
 step "Building Tauri UI (release)"
 pushd ui >/dev/null
 [[ -d node_modules ]] || npm install
-npm run tauri build -- --bundles deb || warn "tauri bundler exited non-zero — checking the raw binary anyway"
+npm run tauri:build -- --bundles deb || warn "tauri bundler exited non-zero — checking the raw binary anyway"
 popd >/dev/null
 
 # Tauri puts the binary at ui/src-tauri/target/release/<bin name from Cargo.toml>.
@@ -228,6 +243,13 @@ else
 fi
 
 # ---- 8. systemd user unit ---------------------------------------------------
+# Note: the UI's service.rs heal logic owns this file after the first
+# `loginext-ui` launch. If the canonical template (deploy/systemd/loginext.service)
+# diverges from service.rs's `TEMPLATE_VERSION`, the UI rewrites this
+# file in place from the in-Rust template. Keep the two in lockstep —
+# users on a current loginext-ui will get the latest template either
+# way, but a stale source-of-truth here would be confusing during code
+# review.
 step "Installing systemd user unit"
 mkdir -p "$SYSTEMD_USER_DIR"
 UNIT_SRC="deploy/systemd/loginext.service"
@@ -242,10 +264,10 @@ systemctl --user daemon-reload || warn "systemctl --user daemon-reload failed (n
 if [[ $ENABLE_SERVICE -eq 1 ]]; then
     step "Enabling loginext.service"
     systemctl --user enable --now loginext.service
-    ok "service enabled and started"
+    ok "service enabled and started — autostarts at every login"
 else
-    warn "service installed but NOT enabled. The UI spawns the daemon on demand;"
-    warn "pass --enable-service if you want it to start at every login."
+    warn "service installed but NOT enabled (--no-enable was passed). Bring it up"
+    warn "manually with: systemctl --user enable --now loginext.service"
 fi
 
 # ---- done -------------------------------------------------------------------

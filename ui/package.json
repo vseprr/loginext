@@ -1,6 +1,6 @@
 {
   "name": "loginext-ui",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "private": true,
   "description": "LogiNext control panel — neumorphism-dark Tauri frontend.",
   "type": "module",
@@ -8,7 +8,8 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
-    "tauri": "WEBKIT_DISABLE_DMABUF_RENDERER=1 tauri"
+    "tauri": "WEBKIT_DISABLE_DMABUF_RENDERER=1 tauri",
+    "tauri:build": "npm run build && WEBKIT_DISABLE_DMABUF_RENDERER=1 tauri build"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0"

@@ -174,10 +174,26 @@ export function detachRules(): void {
 // ── Initial data load ────────────────────────────────────────────────
 
 async function initialFetch(): Promise<void> {
-  try {
-    const pres = await ipc.listPresets();
-    if (pres.ok) presets = (pres as PresetsResponse).presets;
-  } catch { /* offline */ }
+  // Retry list_presets a handful of times on cold start. The daemon
+  // can be in its bounded udev-find retry (up to 20 s on cold boot)
+  // when the UI mounts: the IPC socket is bound (so connect succeeds)
+  // but the listener fd isn't in epoll yet, so the request times out
+  // at the IPC bridge's 500 ms read deadline. Without this loop, the
+  // preset list stays empty for the lifetime of the UI window. Six
+  // attempts × 1 s ≈ the daemon's full retry budget, and a healthy
+  // session still sees a hit on attempt 1 (cost: ~1 ms).
+  for (let attempt = 0; attempt < 6; attempt++) {
+    try {
+      const pres = await ipc.listPresets();
+      if (pres.ok) {
+        presets = (pres as PresetsResponse).presets;
+        break;
+      }
+    } catch { /* offline */ }
+    if (attempt < 5) {
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+  }
 
   try {
     const rs = await ipc.listAppRules();

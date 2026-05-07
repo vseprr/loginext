@@ -73,6 +73,28 @@ The daemon **runs as the seat user, never as root**. Both the PKGBUILD (`deploy/
 
 ## Process model (read before touching lifecycle code)
 
-- The user launches the UI. The Tauri shell probes `$XDG_RUNTIME_DIR/loginext.sock`; if dead, it spawns the C++ daemon **detached** (`setsid`, stdio → `/dev/null`).
+- The user launches the UI. The Tauri shell probes `$XDG_RUNTIME_DIR/loginext/loginext.sock` (under the systemd-managed `RuntimeDirectory=loginext` subdir, mode 0700). If the socket isn't alive it spawns the C++ daemon **detached** (`setsid`, stdio → `/dev/null`).
+- v1.0.0 default: `loginext.service` is enabled by `install.sh` and brought up by systemd at every login. The UI's spawn-detached path is the fallback for hosts that opted out via `--no-enable`.
 - Closing the UI does NOT stop the daemon. Reopening reconnects.
 - Detailed daemon logs always go to `$XDG_STATE_HOME/loginext/daemon.log`. Stderr is reserved for boot/lifecycle/critical lines so a terminal-launched UI stays readable.
+
+## v1.0.0 retrospective — hurdles worth not re-introducing
+
+Phase 2's stabilisation cycle (the fixes that closed v1.0.0) hit four classes of bug repeatedly. Future agents touching the listener / unit / IPC paths should keep these in mind.
+
+1. **systemd-user / Plasma session-env race.** `systemctl --user import-environment XDG_CURRENT_DESKTOP WAYLAND_DISPLAY DISPLAY …` runs *during* Plasma startup, after `default.target` has already activated `loginext.service`. `getenv()` reads a snapshot of `environ` at exec time and never refreshes — so any code path that gates a backend on those vars permanently misses every backend on cold boot. **Rule:** for compositor / session detection at daemon start, use direct probes that depend only on `XDG_RUNTIME_DIR` (which PAM exports before systemd-user). The current implementation is `probe_kwin_on_bus` (sd-bus `NameHasOwner`), `probe_wayland_socket` (`stat()` of `$XDG_RUNTIME_DIR/wayland-{0..3}`), and `probe_x11_display` (`xcb_connect` retry across `:0` / `:1`); see [src/scope/listener.cpp](./src/scope/listener.cpp) `thread_main`.
+
+2. **systemd unit-file mount-namespace ordering.** `ProtectHome=read-only` covers `/run/user/<uid>`; without `ReadWritePaths=` or `RuntimeDirectory=`, the daemon's namespace-builder bails on the missing socket file BEFORE exec runs (`status=226/NAMESPACE`). v1.0.0 uses `RuntimeDirectory=loginext` which creates `$XDG_RUNTIME_DIR/loginext/` with mode 0700 before the daemon starts and tears it down on stop. **Rule:** when adding a new file the daemon needs to write under `/run/user/<uid>` or `$HOME`, prefer `RuntimeDirectory=` / `StateDirectory=` over `ReadWritePaths=` — the former survives crashes cleanly, the latter requires the `-` optional-path prefix or you risk reintroducing 226/NAMESPACE.
+
+3. **Diagnostic deadlines must terminate.** `kwin_dbus_loop`'s 30-second "no events received" warning was ALSO used as the `select()` deadline. When events arrived inside the window (the healthy case), the warning condition `!l->kwin_received_any` never fired → `warned_no_kwin_events` stayed `false` → the deadline kept being computed even after it was in the past → `select(timeout=0)` spun at ~720 000 iterations/sec. **Rule:** any timer that's also a select() deadline must have a terminator on every exit branch, not just the one that fires the timer. The fix was to also set the flag when `l->kwin_received_any` becomes true.
+
+4. **IPC socket bring-up vs. device-grab ordering.** UI clients have a 5-second timeout on the socket-existence probe. If the daemon's blocking init (find_device → grab → emitter → pacer → epoll) runs first and the IPC server initialises last, a slow udev enumeration leaves the socket missing past the UI's deadline. **Rule:** UDS bind happens before any blocking init that could exceed a few hundred ms. Epoll registration of the listener fd can be deferred to after the loop exists — the kernel queues client connects on the listen backlog and they're accepted as soon as the event loop starts.
+
+5. **Tauri bundle targets.** `"targets": "all"` invokes the AppImage bundler, which validates icons as 512 × 512 square. We ship a single non-square icon and don't actually distribute via AppImage (deb is what `install.sh` and `PKGBUILD` consume). **Rule:** keep `bundle.targets` to the formats actually shipped — adding a new bundler is opt-in, not the default.
+
+### Active diagnostic surface
+
+- `--debug-events` — raw `(type, code, value)` libevdev dump for hardware discovery.
+- `--debug-perf` — per-second wakeup / event / sd_bus_process counters from both threads. Run for 60 s and read the `perf[main]` / `perf[listener]` lines; a CPU spinner is whichever loop reports thousands of iterations per second.
+- `journalctl --user -u loginext.service -b 0` — the systemd-managed lifecycle.
+- `~/.local/state/loginext/daemon.log` — the detailed file log (LX_INFO + LX_DEBUG that `--quiet` suppresses from journald).

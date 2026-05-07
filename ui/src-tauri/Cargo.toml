@@ -1,6 +1,6 @@
 [package]
 name        = "loginext-ui"
-version     = "0.1.0"
+version     = "1.0.0"
 edition     = "2021"
 description = "LogiNext control panel — Tauri shell that bridges the UI to the daemon's UDS."
 license     = "MIT"

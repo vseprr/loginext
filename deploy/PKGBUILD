@@ -116,7 +116,14 @@ build() {
     cd ui
     # `--bundles deb` skips AppImage / RPM bundlers — we install via the
     # PKGBUILD itself, the Tauri-produced .deb is just incidental output.
-    npm run tauri build -- --bundles deb || true
+    #
+    # Use the `tauri:build` composite script (defined in package.json)
+    # rather than `npm run tauri build` directly. The composite runs
+    # `vite build` explicitly before invoking `tauri build` — Tauri's
+    # own `beforeBuildCommand` would do the same, but routing through
+    # the composite makes the Vite step visible in build logs and
+    # matches the canonical command documented in src-tauri/README.md.
+    npm run tauri:build -- --bundles deb || true
     [[ -x src-tauri/target/release/loginext-ui ]] ||
         { echo "Tauri build did not produce loginext-ui"; exit 1; }
 }

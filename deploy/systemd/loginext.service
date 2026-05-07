@@ -25,6 +25,21 @@ Documentation=https://github.com/vseprr/loginext
 After=graphical-session.target
 PartOf=graphical-session.target
 
+# Start-limit guards MUST live in [Unit], not [Service]. systemd silently
+# ignores them (logs `Unknown key 'StartLimitIntervalSec' in section
+# [Service]`) if placed under [Service], which caused a real production
+# regression: the daemon looped ~90 restart attempts after a failure
+# instead of giving up after 5. Keep these two directives here.
+#
+# 120 s window: the daemon's bounded udev-retry in main.cpp can take up
+# to 20 s per restart cycle while waiting for /dev/input/event* to
+# enumerate at cold boot, so 5 attempts × (15 s RestartSec + 20 s retry
+# budget) ≈ 175 s. Sizing the window at 120 s keeps the 5-burst guard
+# meaningful while ensuring a single slow boot doesn't latch the unit
+# dead with start-limit-hit.
+StartLimitIntervalSec=120
+StartLimitBurst=5
+
 [Service]
 Type=simple
 
@@ -41,27 +56,85 @@ ExecStart=/usr/bin/loginext --quiet
 ExecReload=/bin/kill -HUP $MAINPID
 
 # Restart on crash, but back off so a misconfigured device or missing
-# /dev/uinput doesn't fork-bomb the user session.
+# /dev/uinput doesn't fork-bomb the user session. RestartSec=15 pairs
+# with main.cpp's bounded udev retry (10 × 2 s) to give the daemon a
+# ~35 s window per restart cycle to catch up to a slow-enumerating
+# /dev/input/event* at cold boot. `StartLimitIntervalSec` /
+# `StartLimitBurst` live in [Unit] above — they are NOT valid here.
 Restart=on-failure
-RestartSec=3
-StartLimitIntervalSec=60
-StartLimitBurst=5
+RestartSec=15
+# 143 = 128 + SIGTERM. Without this, on-failure treats the SIGTERM that
+# `PartOf=graphical-session.target` propagation delivers as a clean stop
+# and the unit doesn't come back when the session restarts.
+RestartForceExitStatus=143
+
+# Informational only — documents that the unit's lifecycle is tied to
+# the graphical session. systemd does not interpret X-prefixed keys;
+# the actual coupling lives in PartOf= above.
+X-Restart-Triggers=graphical-session.target
+
+# Resource ceilings — without these the cgroup is unbounded and
+# systemd-oomd (default-on under Plasma 6 / CachyOS) will SIGKILL
+# the daemon on sustained CPU pressure. Observed on a real session:
+# 94% CPU for 9 min → status=9/KILL with peak RSS only 2.4 MB, i.e.
+# the kill was PSI-driven (cgroup memory-pressure or swap-pressure
+# stall) and NOT classic OOM. The ceilings below are 50× the observed
+# RSS — generous, but cap absolute damage if the pacer state machine
+# ever wedges. CPUQuota=50% likewise caps any runaway loop at half
+# a core so the rest of the desktop stays responsive.
+MemoryHigh=32M
+MemoryMax=64M
+TasksMax=32
+CPUQuota=50%
+
+# systemd-oomd opt-out. `omit` is the strongest exclusion: this cgroup
+# is never considered for pressure-kill, regardless of PSI score.
+# We don't fall through to `avoid` because the underlying CPU runaway
+# (a libevdev_next_event spin on a dead device fd, observed in
+# production: 11 min spin between an unplug and the next signal) is
+# now caught by core/event_loop.cpp's fatal-error path — the daemon
+# exits cleanly on -ENODEV and systemd's Restart=on-failure brings it
+# back, so we no longer need oomd as the kill-of-last-resort. Requires
+# systemd ≥ 248; Plasma 6 baselines satisfy this.
+#
+# NOTE: do NOT set `ManagedOOMMemoryPressure=` or `ManagedOOMSwap=`
+# here. Their default value `auto` means "exclude from oomd
+# monitoring"; setting them to `kill` explicitly OPTS THE CGROUP IN
+# to oomd's kill list — the opposite of what the directive name
+# suggests. An earlier draft had this backwards, which made the
+# SIGKILL pattern worse rather than better.
+ManagedOOMPreference=omit
 
 # Hardening — most of these are no-ops because the daemon only touches
 # /dev/input, /dev/uinput, and a single config + log file. Belt and braces.
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=read-only
-# Leading `-` makes each path optional. Critical for `%t/loginext.sock`:
-# at service start the socket FILE does not exist yet (the daemon creates
-# it during init), and ProtectHome=read-only locks /run/user/<uid>
-# read-only inside the mount namespace. Without `-`, systemd's
-# namespacing step fails with `226/NAMESPACE` ("Failed to set up mount
-# namespacing: ... No such file or directory") *before* exec runs, and
-# the unit auto-restart-loops without ever launching the daemon. The
-# `-` lets systemd register the writable mount lazily so the daemon
-# can create the socket as it normally would.
-ReadWritePaths=-%S/loginext -%t/loginext.sock
+
+# systemd creates /run/user/<uid>/loginext on unit start (mode 0700)
+# and removes it on stop. This is the canonical way to give a service
+# a writable runtime location compatible with ProtectHome=read-only,
+# which would otherwise lock /run/user/<uid> read-only inside the
+# namespace and prevent the daemon from binding its IPC socket. The
+# socket lives at %t/loginext/loginext.sock — kept in lockstep with
+# ipc/server.cpp::resolve_socket_path() (daemon) and
+# daemon::socket_path() (UI) so all three agree.
+#
+# Earlier templates relied on `ReadWritePaths=-%t/loginext.sock` to
+# punch a writable hole for the socket. The leading `-` made systemd
+# tolerate a missing file but did NOT make the writable bind mount
+# lazy: when the file did not yet exist (always true at fresh
+# startup) systemd skipped the mount entirely and bind() failed
+# with EROFS. The error was masked by the daemon's `--quiet` flag,
+# which used to suppress all stderr levels including ERROR. Both
+# the bind path and the --quiet semantics are fixed now.
+RuntimeDirectory=loginext
+RuntimeDirectoryMode=0700
+
+# %S/loginext is $XDG_STATE_HOME/loginext (the daemon's log dir).
+# Leading `-` marks the path optional in case the directory does not
+# yet exist on a fresh install.
+ReadWritePaths=-%S/loginext
 PrivateTmp=true
 ProtectKernelTunables=true
 ProtectKernelModules=true
@@ -71,5 +144,26 @@ LockPersonality=true
 RestrictRealtime=true
 SystemCallArchitectures=native
 
+# `default.target` is the canonical user-manager autostart target — it is
+# always reached on `systemctl --user` bring-up, regardless of how the
+# graphical session is wired up by the display manager.
+#
+# We deliberately do NOT use `WantedBy=graphical-session.target` here,
+# even though the unit is tied to that target via `PartOf=` above. The
+# reason is that `graphical-session.target` is a "reverse-dependency
+# only" target (`RefuseManualStart=yes` per systemd.special(7)) — it is
+# only pulled in when a desktop-session service explicitly does
+# `Wants=graphical-session.target` on its own unit. On several Plasma 6
+# boot paths (SDDM → Wayland on CachyOS/Arch being the ones we care
+# about) the user-manager session bring-up does NOT pull in
+# graphical-session.target, so units `WantedBy=` it stay stopped at
+# boot even though `is-enabled` returns `enabled`. `default.target` is
+# not subject to this — the `.wants/` symlink is always walked.
+#
+# Session-lifecycle coupling (the original motivation for the earlier
+# switch to graphical-session.target) is preserved by `PartOf=` alone:
+# a stop or restart of graphical-session.target propagates to this
+# unit, and `Restart=on-failure` + `RestartForceExitStatus=143` below
+# catches the SIGTERM the propagation delivers.
 [Install]
 WantedBy=default.target

@@ -31,6 +31,10 @@ struct Listener {
     pthread_t             thread{};
     int                   wake_pipe[2]{-1, -1};   // self-pipe to break out of select()
     bool                  started = false;
+    // When true the kwin-dbus loop emits per-second wakeup / sd_bus_process /
+    // publish counters via LX_INFO. Set from the --debug-perf CLI flag at
+    // start() time. Single-thread access (only the listener reads).
+    bool                  debug_perf = false;
 
     std::mutex            intro_mutex;
     char                  intro_name[128]{};      // raw class / app id (rule-key candidate)

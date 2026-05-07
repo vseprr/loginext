@@ -30,20 +30,29 @@ struct EventLoop {
 [[nodiscard]] int register_timer(EventLoop& loop, int timer_fd) noexcept;
 
 // Block on epoll, drain libevdev events, dispatch through callbacks.
-// Runs until *stop becomes true (set by SIGINT/SIGTERM handler).
+// Runs until *stop becomes true (set by SIGINT/SIGTERM handler) or a fatal
+// device error (e.g. -ENODEV on USB unplug) forces an early exit.
 // *reload is consumed (reset to 0) after each reload_cb invocation.
 // `debug_events` is a hardware-discovery flag: when true, every raw input_event
 // drained from libevdev is dumped to stderr before normal dispatch. The check
 // is a single predicted-not-taken branch; production runs (default false) pay
 // nothing measurable.
-void run_loop(EventLoop& loop, int device_fd, void* evdev,
+//
+// Return value:
+//   0 — clean stop (signal-driven OR cooperative IPC `quit`).
+//   1 — fatal device error (caller should exit non-zero so systemd's
+//       Restart=on-failure brings the daemon back, then the bounded
+//       find_device() retry in main.cpp waits for udev to re-publish
+//       the device on replug / resume-from-sleep).
+[[nodiscard]] int run_loop(EventLoop& loop, int device_fd, void* evdev,
               volatile sig_atomic_t* stop,
               volatile sig_atomic_t* reload,
               EventCallback  event_cb,  void* event_ctx,
               TimerCallback  timer_cb,  void* timer_ctx,
               ReloadCallback reload_cb, void* reload_ctx,
               IoCallback     io_cb,     void* io_ctx,
-              bool           debug_events) noexcept;
+              bool           debug_events,
+              bool           debug_perf  = false) noexcept;
 
 // Close the epoll fd.
 void shutdown_loop(EventLoop& loop) noexcept;

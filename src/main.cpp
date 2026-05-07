@@ -17,6 +17,7 @@
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
+#include <ctime>
 #include <linux/input.h>
 #include <string>
 #include <sys/epoll.h>
@@ -185,7 +186,14 @@ int main(int argc, char* argv[]) {
 
     // --- Logger init (before anything that might log) ---
     loginext::util::LogConfig logcfg{};
-    logcfg.stderr_enabled = !cli.quiet;
+    // --quiet raises the stderr threshold to Warn instead of disabling the
+    // sink entirely. Disabling stderr made every WARN/ERROR vanish from
+    // journald when running as a systemd user unit (ExecStart=... --quiet),
+    // which masked real bind/sandbox/dbus failures and made debugging
+    // impossible. Lifecycle Info chatter is still suppressed so journalctl
+    // stays readable; problems still get through.
+    logcfg.stderr_level = cli.quiet ? loginext::util::LogLevel::Warn
+                                    : loginext::util::LogLevel::Info;
     logcfg.file_level = cli.verbose ? loginext::util::LogLevel::Trace
                                     : loginext::util::LogLevel::Debug;
     loginext::util::log_init(logcfg);
@@ -230,21 +238,81 @@ int main(int argc, char* argv[]) {
     // Ignore SIGPIPE so a disconnected UI client mid-write() never terminates us.
     signal(SIGPIPE, SIG_IGN);
 
+    // --- IPC bring-up (early) ---
+    // Must run BEFORE the device-retry loop below. The UI's daemon-startup
+    // probe checks for the listener socket at $XDG_RUNTIME_DIR/loginext.sock
+    // with a 5 s timeout. If the daemon is mid-retry waiting for udev to
+    // enumerate /dev/input/event*, the socket would not exist yet and the
+    // UI would log `systemd-managed socket … did not come up within 5000ms`
+    // and load with an empty preset list. Binding the socket here, before
+    // the retry, makes the UI's existence probe pass immediately. The
+    // epoll registration for the listener fd is deferred to after
+    // init_loop() below — until then no requests are serviced, but the
+    // kernel queues client connects on the listen backlog and they're
+    // accepted as soon as the event loop starts.
+    //
+    // Settings + rules are already loaded (lines above) so the dispatch
+    // context is fully populated. A bind failure here is non-fatal: the
+    // daemon still does its primary job (input grab + emit) even if the
+    // UI channel is dead — same posture as the original late bring-up.
+    app.ipc_ctx = { &app.settings, &g_reload, -1, &app.scope, &app.rules,
+                    &g_stop };
+    bool ipc_bound = (loginext::ipc::init_server(app.ipc) == 0);
+    if (ipc_bound) {
+        LX_INFO("ipc: socket %s (epoll registration deferred)", app.ipc.sock_path);
+    } else {
+        LX_WARN("ipc: socket bind failed — UI channel disabled");
+    }
+
     // --- Init ---
+    // Bounded udev grace window: at cold boot the user-manager's
+    // default.target is reached before udev finishes enumerating
+    // /dev/input/event*, so a freshly-started systemd unit can land
+    // here with no Logitech device visible yet. Without this retry
+    // the daemon would exit non-zero, systemd would restart it on
+    // RestartSec=15, and a slow boot can chew through StartLimitBurst=5
+    // before the receiver appears. 10 attempts × 2 s = 20 s grace per
+    // restart cycle — sized against StartLimitIntervalSec=120 in the
+    // unit file so the burst guard remains meaningful.
     auto dev = loginext::core::find_device();
     if (!dev.valid()) {
-        LX_ERROR("MX Master 3S not found — check device is paired and /dev/input/event* is readable");
+        constexpr int kFindRetries = 9;       // + the one above = 10 total attempts
+        constexpr int kFindIntervalSec = 2;
+        for (int attempt = 1; attempt <= kFindRetries; ++attempt) {
+            if (g_stop) {
+                LX_INFO("device search interrupted by signal — exiting");
+                if (ipc_bound) loginext::ipc::shutdown_server(app.ipc);
+                loginext::util::log_shutdown();
+                return EXIT_FAILURE;
+            }
+            LX_WARN("MX Master 3S not yet enumerated by udev "
+                    "(attempt %d/%d) — retrying in %d s",
+                    attempt, kFindRetries + 1, kFindIntervalSec);
+            // nanosleep returns -1/EINTR when SIGTERM/SIGINT lands (sa_flags=0
+            // above so signals interrupt syscalls); next iteration checks
+            // g_stop and exits cleanly. Don't restart the sleep on EINTR.
+            struct timespec req{kFindIntervalSec, 0};
+            nanosleep(&req, nullptr);
+            dev = loginext::core::find_device();
+            if (dev.valid()) break;
+        }
+    }
+    if (!dev.valid()) {
+        LX_ERROR("MX Master 3S not found after retries — check device is paired and /dev/input/event* is readable");
+        if (ipc_bound) loginext::ipc::shutdown_server(app.ipc);
         loginext::util::log_shutdown();
         return EXIT_FAILURE;
     }
 
     if (loginext::core::grab_device(dev) < 0) {
+        if (ipc_bound) loginext::ipc::shutdown_server(app.ipc);
         loginext::core::release_device(dev);
         loginext::util::log_shutdown();
         return EXIT_FAILURE;
     }
 
     if (loginext::core::init_emitter(app.emitter) < 0) {
+        if (ipc_bound) loginext::ipc::shutdown_server(app.ipc);
         loginext::core::release_device(dev);
         loginext::util::log_shutdown();
         return EXIT_FAILURE;
@@ -253,6 +321,7 @@ int main(int argc, char* argv[]) {
     app.pacer.profile = &app.settings.profile;
 
     if (loginext::core::init_pacer(app.pacer) < 0) {
+        if (ipc_bound) loginext::ipc::shutdown_server(app.ipc);
         loginext::core::destroy_emitter(app.emitter);
         loginext::core::release_device(dev);
         loginext::util::log_shutdown();
@@ -261,6 +330,7 @@ int main(int argc, char* argv[]) {
 
     loginext::core::EventLoop loop{};
     if (loginext::core::init_loop(loop, dev.fd) < 0) {
+        if (ipc_bound) loginext::ipc::shutdown_server(app.ipc);
         loginext::core::destroy_pacer(app.pacer);
         loginext::core::destroy_emitter(app.emitter);
         loginext::core::release_device(dev);
@@ -269,6 +339,7 @@ int main(int argc, char* argv[]) {
     }
 
     if (loginext::core::register_timer(loop, app.pacer.timer_fd) < 0) {
+        if (ipc_bound) loginext::ipc::shutdown_server(app.ipc);
         loginext::core::shutdown_loop(loop);
         loginext::core::destroy_pacer(app.pacer);
         loginext::core::destroy_emitter(app.emitter);
@@ -277,21 +348,24 @@ int main(int argc, char* argv[]) {
         return EXIT_FAILURE;
     }
 
-    // IPC bring-up. A failure here is non-fatal: the daemon still does its
-    // primary job (tab switching) even if the UI channel is dead.
+    // IPC epoll registration. The listener was already bound above (before
+    // the device retry) so the UI's existence probe passed regardless of
+    // udev timing; here we wire the listen fd into the event loop so
+    // accept() actually fires on incoming connects. A failure here is
+    // non-fatal: the daemon still does its primary job (input grab + emit)
+    // even if the UI channel is dead.
     app.epoll_fd = loop.epoll_fd;
-    app.ipc_ctx  = { &app.settings, &g_reload, -1, &app.scope, &app.rules,
-                     &g_stop };
 
-    if (loginext::ipc::init_server(app.ipc) == 0) {
+    if (ipc_bound) {
         epoll_event ev{};
         ev.events  = EPOLLIN;
         ev.data.fd = app.ipc.listen_fd;
         if (epoll_ctl(loop.epoll_fd, EPOLL_CTL_ADD, app.ipc.listen_fd, &ev) < 0) {
             LX_WARN("ipc: epoll add listener failed — UI channel disabled");
             loginext::ipc::shutdown_server(app.ipc);
+            ipc_bound = false;
         } else {
-            LX_INFO("ipc: socket %s", app.ipc.sock_path);
+            LX_INFO("ipc: epoll registration complete — accepting clients");
         }
     }
 
@@ -299,6 +373,7 @@ int main(int argc, char* argv[]) {
     // A failure to start is non-fatal: the daemon falls back to global-only
     // resolution and logs a warning. start() does not block on compositor
     // I/O; the actual probe runs inside the spawned thread.
+    app.scope.debug_perf = cli.debug_perf;
     if (loginext::scope::start(app.scope) != 0) {
         LX_WARN("scope: listener disabled — per-app rules inactive");
     }
@@ -309,14 +384,19 @@ int main(int argc, char* argv[]) {
     if (cli.debug_events) {
         LX_INFO("debug-events mode active: raw input_event dump on stderr");
     }
+    if (cli.debug_perf) {
+        LX_INFO("debug-perf mode active: per-second counters via "
+                "perf[main] / perf[listener] log lines");
+    }
 
-    loginext::core::run_loop(loop, dev.fd, dev.evdev,
+    int loop_rc = loginext::core::run_loop(loop, dev.fd, dev.evdev,
                              &g_stop, &g_reload,
                              on_event,  &app,
                              on_timer,  &app,
                              on_reload, &app,
                              on_io,     &app,
-                             cli.debug_events);
+                             cli.debug_events,
+                             cli.debug_perf);
 
     // --- Teardown (reverse order of init) ---
     LX_INFO("shutting down");
@@ -328,5 +408,8 @@ int main(int argc, char* argv[]) {
     loginext::core::release_device(dev);
     loginext::util::log_shutdown();
 
-    return EXIT_SUCCESS;
+    // Non-zero on a fatal device error so systemd's Restart=on-failure
+    // fires; the bounded find_device() retry above then waits for udev
+    // to re-publish the device on replug / resume-from-sleep.
+    return loop_rc == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
 }

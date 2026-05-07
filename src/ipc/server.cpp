@@ -16,28 +16,65 @@ namespace loginext::ipc {
 
 namespace {
 
-// Compute $XDG_RUNTIME_DIR/loginext.sock or /tmp/loginext-<uid>.sock.
+// Compute $XDG_RUNTIME_DIR/loginext/loginext.sock or
+// /tmp/loginext-<uid>/loginext.sock.
 // Under sudo, XDG_RUNTIME_DIR is stripped and getuid() returns 0 — both
-// wrong for agreeing with the UI process.  Fall back to SUDO_UID so the
+// wrong for agreeing with the UI process. Fall back to SUDO_UID so the
 // socket lands in the invoking user's runtime dir.
+//
+// The nested `/loginext/` directory matches `RuntimeDirectory=loginext`
+// in the systemd unit (template v8+), which creates this dir as a
+// writable per-unit location compatible with ProtectHome=read-only.
+// When the daemon runs OUTSIDE systemd (UI spawn-detached path), the
+// directory may not exist — we mkdir it lazily so the same path works
+// on both lifecycle paths. Mode 0700 matches RuntimeDirectoryMode= in
+// the unit so the spawn-detached path doesn't accidentally widen
+// permissions.
+//
 // Writes into `out` (capacity sock_path_buf). Returns true on success.
 bool resolve_socket_path(char* out) noexcept {
+    auto try_compose = [&](const char* runtime_root) -> bool {
+        char dir[sock_path_buf];
+        int dn = std::snprintf(dir, sock_path_buf, "%s/loginext", runtime_root);
+        if (dn <= 0 || dn >= sock_path_buf) return false;
+        // mkdir is idempotent on EEXIST. Under systemd this dir already
+        // exists (RuntimeDirectory=loginext); outside systemd we create
+        // it ourselves. EROFS / EPERM here means we can't proceed —
+        // bind() would fail anyway, and the LX_ERROR in init_server()
+        // will surface the precise reason.
+        if (mkdir(dir, 0700) < 0 && errno != EEXIST) {
+            // Fall through and let bind() fail loudly — the diagnostic
+            // there is more informative than a path-resolve "ok-but-not".
+        }
+        int n = std::snprintf(out, sock_path_buf, "%s/loginext.sock", dir);
+        return n > 0 && n < sock_path_buf;
+    };
+
     const char* xdg = std::getenv("XDG_RUNTIME_DIR");
     if (xdg && *xdg) {
-        int n = std::snprintf(out, sock_path_buf, "%s/loginext.sock", xdg);
-        return n > 0 && n < sock_path_buf;
+        return try_compose(xdg);
     }
 
     // Under sudo: use the real user's runtime dir so the UI finds us.
     const char* sudo_uid = std::getenv("SUDO_UID");
     if (sudo_uid && *sudo_uid) {
-        int n = std::snprintf(out, sock_path_buf,
-                              "/run/user/%s/loginext.sock", sudo_uid);
-        return n > 0 && n < sock_path_buf;
+        char root[sock_path_buf];
+        int rn = std::snprintf(root, sock_path_buf, "/run/user/%s", sudo_uid);
+        if (rn > 0 && rn < sock_path_buf) {
+            return try_compose(root);
+        }
     }
 
-    int n = std::snprintf(out, sock_path_buf, "/tmp/loginext-%u.sock",
-                          static_cast<unsigned>(getuid()));
+    // Last-ditch fallback: /tmp. Use a uid-suffixed dir to avoid
+    // colliding with another user's daemon on shared hosts.
+    char root[sock_path_buf];
+    int rn = std::snprintf(root, sock_path_buf, "/tmp/loginext-%u",
+                           static_cast<unsigned>(getuid()));
+    if (rn <= 0 || rn >= sock_path_buf) return false;
+    if (mkdir(root, 0700) < 0 && errno != EEXIST) {
+        // Same fall-through as above.
+    }
+    int n = std::snprintf(out, sock_path_buf, "%s/loginext.sock", root);
     return n > 0 && n < sock_path_buf;
 }
 

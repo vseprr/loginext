@@ -16,6 +16,7 @@ struct CliOptions {
     bool            quiet = false;    // suppress stderr (file log still active)
     bool            verbose = false;  // lower file-log threshold to Trace
     bool            debug_events = false;  // dump raw libevdev events to stderr (hardware discovery)
+    bool            debug_perf   = false;  // emit per-second perf counters (epoll/select wakeups, events, sd_bus calls)
 };
 
 // Returns 0 on success, nonzero on error. Prints usage on --help or error.

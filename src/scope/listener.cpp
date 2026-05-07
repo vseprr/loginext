@@ -13,6 +13,7 @@
 #include <poll.h>
 #include <sys/select.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/un.h>
 #include <unistd.h>
@@ -295,6 +296,167 @@ bool kwin_dbus_loop(Listener* l) noexcept {
     LX_INFO("scope: kwin-dbus active-window detector online "
             "(awaiting KWin script publish on %s)", kwin_dbus_service);
 
+    // ── Cold-boot bootstrap: ask KWin to publish the active window NOW ──
+    //
+    // Why this exists: on cold boot KWin starts roughly in parallel with
+    // the daemon. KWin loads the persistent `loginext-focus` script (if
+    // enabled in kwinrc), and the script's load-time `publishCurrent()`
+    // runs ONCE — but it can fire BEFORE the daemon has claimed
+    // `org.loginext.WindowFocus` on the bus, in which case sd-bus
+    // discards the call with NameHasNoOwner and the daemon never sees
+    // it. The script's 2 s heartbeat is supposed to recover, but on
+    // some sessions the script is not auto-enabled in kwinrc at all
+    // and the only path to a working state was the UI's
+    // `register_kwin_script` flow (which the user explicitly does NOT
+    // want to depend on for cold boot — see commit message for issue
+    // #1).
+    //
+    // Two-layer bootstrap, stronger to weaker:
+    //
+    //   1. **Inline one-shot script via Scripting.loadScript** — writes
+    //      a tiny `.js` to the daemon's state dir, asks KWin to load
+    //      and run it. The script reads `workspace.activeWindow` and
+    //      callDBus's our `Activated` method directly. Bypasses the
+    //      persistent script entirely; works even if the user has
+    //      `loginext-focusEnabled=false` in kwinrc.
+    //
+    //   2. **org.kde.KWin.reconfigure** — fallback if loadScript fails
+    //      (older KWin that doesn't expose Scripting on the user bus,
+    //      missing $XDG_STATE_HOME, etc.). Asks KWin to re-read kwinrc
+    //      and reload all enabled scripts, which fires the persistent
+    //      `loginext-focus` script's `publishCurrent()` if it IS
+    //      enabled. Cheap; KWin KCMs trigger the same call.
+    //
+    // Both calls are best-effort. Failures here are non-fatal — the
+    // persistent script's heartbeat (when present) is still the
+    // long-term steady-state mechanism.
+    bool bootstrap_published = false;
+    {
+        char state_dir[256] = {0};
+        if (const char* xdg = std::getenv("XDG_STATE_HOME"); xdg && *xdg) {
+            std::snprintf(state_dir, sizeof(state_dir), "%s/loginext", xdg);
+        } else if (const char* home = std::getenv("HOME"); home && *home) {
+            std::snprintf(state_dir, sizeof(state_dir),
+                          "%s/.local/state/loginext", home);
+        }
+
+        if (state_dir[0] != '\0') {
+            char script_path[320];
+            std::snprintf(script_path, sizeof(script_path),
+                          "%s/kwin-bootstrap-%d.js",
+                          state_dir, static_cast<int>(getpid()));
+
+            // Inline script: pull the current active window and push it
+            // to our `Activated` method via callDBus. KWin's QtScript
+            // engine accepts both `workspace.activeWindow` (Plasma 6)
+            // and `workspace.activeClient` (Plasma 5 fallback).
+            static constexpr const char inline_body[] =
+                "var w = workspace.activeWindow || workspace.activeClient;\n"
+                "if (w) {\n"
+                "    callDBus(\n"
+                "        \"org.loginext.WindowFocus\",\n"
+                "        \"/org/loginext/WindowFocus\",\n"
+                "        \"org.loginext.WindowFocus\",\n"
+                "        \"Activated\",\n"
+                "        \"\" + (w.resourceClass || \"\"),\n"
+                "        \"\" + (w.resourceName  || \"\")\n"
+                "    );\n"
+                "}\n";
+
+            FILE* f = std::fopen(script_path, "w");
+            if (f) {
+                std::fwrite(inline_body, 1, sizeof(inline_body) - 1, f);
+                std::fclose(f);
+
+                char plugin_name[64];
+                std::snprintf(plugin_name, sizeof(plugin_name),
+                              "loginext-bootstrap-%d",
+                              static_cast<int>(getpid()));
+
+                // Step 1: Scripting.loadScript(path, name) → returns int
+                // script id. KWin parses the file, registers it under
+                // the given plugin name, and returns a numeric handle.
+                sd_bus_message* reply = nullptr;
+                sd_bus_error    err{};
+                int             load_rc = sd_bus_call_method(bus,
+                    "org.kde.KWin", "/Scripting", "org.kde.kwin.Scripting",
+                    "loadScript", &err, &reply,
+                    "ss", script_path, plugin_name);
+                int32_t script_id = -1;
+                if (load_rc >= 0 && reply) {
+                    sd_bus_message_read(reply, "i", &script_id);
+                    sd_bus_message_unref(reply);
+                }
+                if (load_rc < 0 || script_id < 0) {
+                    LX_DEBUG("scope: kwin Scripting.loadScript failed (%s)",
+                             err.message ? err.message
+                                         : (load_rc < 0 ? std::strerror(-load_rc)
+                                                        : "no script id returned"));
+                }
+                sd_bus_error_free(&err);
+
+                // Step 2: Script<id>.run() — actually execute the
+                // script body. loadScript only registers; without
+                // run(), KWin doesn't dispatch the JS.
+                if (script_id >= 0) {
+                    char obj_path[64];
+                    std::snprintf(obj_path, sizeof(obj_path),
+                                  "/Scripting/Script%d", script_id);
+                    err = {};
+                    int run_rc = sd_bus_call_method(bus,
+                        "org.kde.KWin", obj_path, "org.kde.kwin.Script",
+                        "run", &err, nullptr, "");
+                    if (run_rc < 0) {
+                        LX_DEBUG("scope: kwin Script%d.run() failed (%s)",
+                                 script_id,
+                                 err.message ? err.message
+                                             : std::strerror(-run_rc));
+                    } else {
+                        LX_INFO("scope: kwin bootstrap script run "
+                                "(id=%d) — active window should publish "
+                                "via Activated within ~50ms",
+                                script_id);
+                        bootstrap_published = true;
+                    }
+                    sd_bus_error_free(&err);
+                }
+
+                // KWin reads the script body into memory at
+                // loadScript() time, so the on-disk file is no longer
+                // needed. Removing it keeps the state dir tidy across
+                // daemon restarts.
+                std::remove(script_path);
+            } else {
+                LX_DEBUG("scope: kwin bootstrap fopen(%s) failed: %s — "
+                         "falling back to reconfigure",
+                         script_path, std::strerror(errno));
+            }
+        }
+    }
+
+    // Fallback path: if the inline script bootstrap above didn't fire
+    // (older KWin / missing state dir / file write blocked by sandbox),
+    // ask KWin to reload all enabled scripts. Useful when the user has
+    // the persistent `loginext-focus` script enabled — its load-time
+    // `publishCurrent()` will then push the active window.
+    if (!bootstrap_published) {
+        sd_bus_error rc_err{};
+        int rc_call = sd_bus_call_method(bus,
+            "org.kde.KWin", "/KWin", "org.kde.KWin", "reconfigure",
+            &rc_err, nullptr, "");
+        if (rc_call < 0) {
+            LX_DEBUG("scope: kwin reconfigure also failed (%s) — bootstrap "
+                     "skipped; the persistent script's 2 s heartbeat is "
+                     "the only remaining seed mechanism",
+                     rc_err.message ? rc_err.message : std::strerror(-rc_call));
+        } else {
+            LX_INFO("scope: kwin reconfigure dispatched (loadScript "
+                    "bootstrap unavailable) — persistent script reload "
+                    "should publish active window within ~50ms");
+        }
+        sd_bus_error_free(&rc_err);
+    }
+
     int bus_fd = sd_bus_get_fd(bus);
     if (bus_fd < 0) {
         LX_WARN("scope: sd_bus_get_fd failed (%s)", std::strerror(-bus_fd));
@@ -317,6 +479,20 @@ bool kwin_dbus_loop(Listener* l) noexcept {
     constexpr uint64_t kwin_warn_after_us = 30'000'000ULL;
     bool warned_no_kwin_events = false;
 
+    // --debug-perf: per-second counters. Every 1000 ms we emit one LX_INFO
+    // line summarising select() wakeups, sd_bus_process work, and Activated
+    // calls processed. Lets the user pinpoint which loop is consuming CPU
+    // when the daemon's cgroup shows sustained pressure. Zero overhead when
+    // the flag is off (the perf_* updates compile away to dead stores when
+    // the surrounding `if` is constant-false at runtime, but we keep them
+    // unconditional anyway — atomic increments on a thread-local would be
+    // more work than always-on integer adds on a hot path that wakes at
+    // most every 2 s).
+    timespec perf_last_ts = bind_ts;
+    uint64_t perf_select_wakeups   = 0;
+    uint64_t perf_select_zero_to   = 0;   // wakeups where select returned with 0 timeout
+    uint64_t perf_bus_process_iter = 0;   // sd_bus_process invocations (sum across drains)
+
     while (!l->stop.load(std::memory_order_relaxed)) {
         // Drain everything sd-bus has queued internally before sleeping —
         // sd_bus_process() returns >0 while progress was made, 0 when the
@@ -329,6 +505,7 @@ bool kwin_dbus_loop(Listener* l) noexcept {
                         std::strerror(-rc));
                 goto teardown;
             }
+            ++perf_bus_process_iter;
             if (rc == 0) break;
         }
         if (l->stop.load(std::memory_order_relaxed)) break;
@@ -361,23 +538,39 @@ bool kwin_dbus_loop(Listener* l) noexcept {
         uint64_t bind_us = static_cast<uint64_t>(bind_ts.tv_sec) * 1'000'000ULL
                          + static_cast<uint64_t>(bind_ts.tv_nsec) / 1'000ULL;
 
-        // Fire the one-shot warning if 30 s have passed without a single
-        // Activated() arriving from the KWin script. Phrased as a help
-        // message because it's nearly always a missing kwinrc enablement
-        // flag, not a daemon bug.
-        if (!warned_no_kwin_events && !l->kwin_received_any
-            && now_us - bind_us >= kwin_warn_after_us) {
-            LX_WARN("scope: 30s elapsed since kwin-dbus bind, ZERO Activated() "
-                    "calls received. The 'LogiNext Focus Bridge' KWin script is "
-                    "almost certainly not enabled. Fix it without leaving the "
-                    "shell:\n"
-                    "    kwriteconfig6 --file kwinrc --group Plugins "
-                    "--key loginext-focusEnabled true\n"
-                    "    qdbus6 org.kde.KWin /KWin reconfigure\n"
-                    "or via System Settings → Window Management → KWin Scripts. "
-                    "Until then, per-app rules cannot match (active_app_hash "
-                    "stays at 0 → global preset wins on every event).");
-            warned_no_kwin_events = true;
+        // Three terminating conditions for the warning window — once any
+        // fires, `warned_no_kwin_events` flips and the diagnostic deadline
+        // is dropped from the select() math. Without this gate, a healthy
+        // session that received Activated() events inside the window would
+        // leave the deadline computed-but-already-passed indefinitely,
+        // and `rel = deadline_us > now_us ? deadline_us - now_us : 0`
+        // below would pin tv to 0/0 every iteration → busy spin at
+        // ~720k wakeups/s (observed: 100% CPU on the listener thread,
+        // kicking in exactly 30 s after bind in --debug-perf traces).
+        if (!warned_no_kwin_events) {
+            if (l->kwin_received_any) {
+                // Events arrived inside the window. The KWin bridge is
+                // alive; we no longer need the diagnostic deadline. Don't
+                // log — the focus → … line above already shows the
+                // bridge working.
+                warned_no_kwin_events = true;
+            } else if (now_us - bind_us >= kwin_warn_after_us) {
+                // Genuinely silent for 30 s — fire the help message. The
+                // most common cause is the LogiNext Focus Bridge KWin
+                // script not being enabled in kwinrc.
+                LX_WARN("scope: 30s elapsed since kwin-dbus bind, ZERO "
+                        "Activated() calls received. The 'LogiNext Focus "
+                        "Bridge' KWin script is almost certainly not "
+                        "enabled. Fix it without leaving the shell:\n"
+                        "    kwriteconfig6 --file kwinrc --group Plugins "
+                        "--key loginext-focusEnabled true\n"
+                        "    qdbus6 org.kde.KWin /KWin reconfigure\n"
+                        "or via System Settings → Window Management → "
+                        "KWin Scripts. Until then, per-app rules cannot "
+                        "match (active_app_hash stays at 0 → global "
+                        "preset wins on every event).");
+                warned_no_kwin_events = true;
+            }
         }
 
         // Build the select() timeout. Two deadlines compete: sd-bus's own
@@ -409,7 +602,17 @@ bool kwin_dbus_loop(Listener* l) noexcept {
         FD_SET(l->wake_pipe[0], &rfds);
         int max_fd = bus_fd > l->wake_pipe[0] ? bus_fd : l->wake_pipe[0];
 
+        // Diagnostic: a 0 / near-zero relative timeout means the deadline
+        // already passed, which is the canonical CPU-spin signature
+        // (select returns immediately, loop iterates, no useful work). The
+        // counter lets --debug-perf surface this without tracing every
+        // syscall.
+        const bool tvp_zero = (tvp != nullptr
+                              && tv.tv_sec == 0 && tv.tv_usec == 0);
+        if (tvp_zero) ++perf_select_zero_to;
+
         int sel = select(max_fd + 1, &rfds, &wfds, nullptr, tvp);
+        ++perf_select_wakeups;
         if (sel < 0) {
             if (errno == EINTR) continue;
             LX_WARN("scope: select failed in kwin-dbus loop (%s)",
@@ -423,6 +626,30 @@ bool kwin_dbus_loop(Listener* l) noexcept {
         }
         // sd_bus_process() at the top of the next iteration handles whatever
         // arrived on bus_fd — no need to dispatch from inside the select branch.
+
+        // Per-second perf summary (--debug-perf only). Cheap clock_gettime
+        // call already happens above as `now`, but the summary cadence is
+        // independent of bus_deadline so we recompute here.
+        if (l->debug_perf) {
+            timespec perf_now{};
+            clock_gettime(CLOCK_MONOTONIC, &perf_now);
+            uint64_t since_us =
+                (static_cast<uint64_t>(perf_now.tv_sec - perf_last_ts.tv_sec) * 1'000'000ULL)
+              + (static_cast<uint64_t>(perf_now.tv_nsec) / 1'000ULL)
+              - (static_cast<uint64_t>(perf_last_ts.tv_nsec) / 1'000ULL);
+            if (since_us >= 1'000'000ULL) {
+                LX_INFO("perf[listener]: %lu select wakeups, %lu zero-timeout, "
+                        "%lu sd_bus_process iters in %.2fs",
+                        static_cast<unsigned long>(perf_select_wakeups),
+                        static_cast<unsigned long>(perf_select_zero_to),
+                        static_cast<unsigned long>(perf_bus_process_iter),
+                        static_cast<double>(since_us) / 1'000'000.0);
+                perf_select_wakeups   = 0;
+                perf_select_zero_to   = 0;
+                perf_bus_process_iter = 0;
+                perf_last_ts          = perf_now;
+            }
+        }
     }
 
 teardown:
@@ -785,9 +1012,14 @@ void x11_publish_active(Listener* l, xcb_connection_t* c,
     xcb_icccm_get_wm_class_reply_wipe(&cls);
 }
 
-void x11_loop(Listener* l) noexcept {
+void x11_loop(Listener* l, const char* display = nullptr) noexcept {
     int screen_idx = 0;
-    xcb_connection_t* c = xcb_connect(nullptr, &screen_idx);
+    // `display` is non-null when the polling probe in thread_main
+    // (probe_x11_connect) had to fall back to a literal ":0" / ":1"
+    // because $DISPLAY wasn't yet exported into our environ. Passing
+    // it through avoids a second connection-failed cycle inside the
+    // backend.
+    xcb_connection_t* c = xcb_connect(display, &screen_idx);
     if (!c || xcb_connection_has_error(c)) {
         if (c) xcb_disconnect(c);
         LX_WARN("scope: xcb_connect failed — active-window detection disabled");
@@ -874,57 +1106,193 @@ void x11_loop(Listener* l) noexcept {
     xcb_disconnect(c);
 }
 
+// ── Compositor probes (env-var-free) ─────────────────────────────────
+//
+// systemd --user services started via WantedBy=default.target run BEFORE
+// Plasma exports session env vars (XDG_CURRENT_DESKTOP, WAYLAND_DISPLAY,
+// DISPLAY). `getenv()` reads a snapshot of the process's environ at exec
+// time and never updates in-process — so a daemon that gates its
+// compositor backends on those vars will permanently miss every backend
+// on cold boot, no matter how long it polls.
+//
+// The probes below replace those env-var gates with direct existence
+// checks that depend ONLY on $XDG_RUNTIME_DIR, which PAM exports before
+// systemd-user starts. They're called from a polling loop in thread_main
+// so the listener can wait for whichever compositor surfaces first.
+
+// Returns true if `org.kde.KWin` currently has an owner on the user's
+// session bus. Opens a private bus connection per call (cheap — sd-bus
+// reuses the cached XDG_RUNTIME_DIR/bus socket) so this can be called
+// from outside kwin_dbus_loop without affecting its state.
+bool probe_kwin_on_bus() noexcept {
+    sd_bus* bus = nullptr;
+    int rc = sd_bus_open_user(&bus);
+    if (rc < 0) {
+        if (bus) sd_bus_unref(bus);
+        return false;
+    }
+    sd_bus_message* reply = nullptr;
+    sd_bus_error    err{};
+    rc = sd_bus_call_method(bus,
+        "org.freedesktop.DBus", "/org/freedesktop/DBus",
+        "org.freedesktop.DBus", "NameHasOwner",
+        &err, &reply, "s", "org.kde.KWin");
+    int has = 0;
+    if (rc >= 0 && reply) {
+        sd_bus_message_read(reply, "b", &has);
+        sd_bus_message_unref(reply);
+    }
+    sd_bus_error_free(&err);
+    sd_bus_unref(bus);
+    return has != 0;
+}
+
+// Returns true if a Wayland compositor socket exists at
+// `$XDG_RUNTIME_DIR/wayland-N` for any N in 0..3. KDE Plasma 6 always
+// uses wayland-0; the loop covers nested-compositor / multi-seat setups
+// out of paranoia. Stat-only — no connection, no event drain.
+bool probe_wayland_socket() noexcept {
+    const char* runtime = std::getenv("XDG_RUNTIME_DIR");
+    if (!runtime || !*runtime) return false;
+    for (int n = 0; n < 4; ++n) {
+        char path[256];
+        int written = std::snprintf(path, sizeof(path), "%s/wayland-%d",
+                                    runtime, n);
+        if (written <= 0 || static_cast<size_t>(written) >= sizeof(path)) {
+            continue;
+        }
+        struct stat st{};
+        if (stat(path, &st) == 0 && S_ISSOCK(st.st_mode)) return true;
+    }
+    return false;
+}
+
+// Returns the first display string that gives us a working xcb_connect()
+// (caller-owned, statically-allocated → no free needed), or nullptr if
+// none worked. We try $DISPLAY first when set, then `:0` and `:1` as
+// fallbacks for the cold-boot case where the env var hasn't been
+// exported into our environ yet but XWayland is running on the
+// canonical socket.
+const char* probe_x11_display() noexcept {
+    static thread_local char chosen[8];
+    const char* candidates[3] = { nullptr, nullptr, nullptr };
+    int n = 0;
+    if (const char* env = std::getenv("DISPLAY"); env && *env) {
+        candidates[n++] = env;
+    }
+    candidates[n++] = ":0";
+    candidates[n++] = ":1";
+    for (int i = 0; i < n; ++i) {
+        xcb_connection_t* c = xcb_connect(candidates[i], nullptr);
+        bool ok = (c != nullptr) && (xcb_connection_has_error(c) == 0);
+        if (c) xcb_disconnect(c);
+        if (ok) {
+            std::strncpy(chosen, candidates[i], sizeof(chosen) - 1);
+            chosen[sizeof(chosen) - 1] = '\0';
+            return chosen;
+        }
+    }
+    return nullptr;
+}
+
 // ── Thread entry ─────────────────────────────────────────────────────
 
 void* thread_main(void* arg) noexcept {
     auto* l = static_cast<Listener*>(arg);
 
-    if (const char* his = std::getenv("HYPRLAND_INSTANCE_SIGNATURE"); his && *his) {
-        int sock = hypr_connect(his);
-        if (sock >= 0) {
-            LX_INFO("scope: hyprland active-window detector online");
-            hypr_loop(l, sock);
+    // Backends are tried in priority order: Hyprland → KDE (kwin-dbus) →
+    // KDE/wlroots Wayland (org_kde_plasma_window_management) → X11. The
+    // first one that probes successfully wins; the rest never run, so
+    // the daemon doesn't claim well-known D-Bus names on hosts that
+    // don't need them.
+    //
+    // Polling exists because of the systemd-user / Plasma cold-boot
+    // race: when our service is started by `WantedBy=default.target`,
+    // PAM has already exported XDG_RUNTIME_DIR, but the desktop
+    // session hasn't yet exported XDG_CURRENT_DESKTOP / WAYLAND_DISPLAY
+    // / DISPLAY. The probes above are env-var-free (or env-var-tolerant
+    // for X11), so the polling loop catches up the moment KWin /
+    // wayland / XWayland become reachable on disk + bus — typically
+    // within a few seconds of login on Plasma 6.
+    constexpr int probe_max_attempts  = 30;   // 30 × 2s = 60s total grace
+    constexpr int probe_interval_sec  = 2;
+    bool announced_polling = false;
+
+    for (int attempt = 0; attempt < probe_max_attempts; ++attempt) {
+        if (l->stop.load(std::memory_order_relaxed)) return nullptr;
+
+        // 1. Hyprland — env-var IS reliable on Hyprland because the
+        // Hyprland launcher sets it before exec'ing user services.
+        // Keep the existing path; the failure mode is "not Hyprland",
+        // which the next probes handle.
+        if (const char* his = std::getenv("HYPRLAND_INSTANCE_SIGNATURE");
+            his && *his) {
+            int sock = hypr_connect(his);
+            if (sock >= 0) {
+                LX_INFO("scope: hyprland active-window detector online");
+                hypr_loop(l, sock);
+                return nullptr;
+            }
+            LX_WARN("scope: hyprland socket connect failed, "
+                    "falling through to other backends");
+        }
+
+        // 2. KDE Plasma — preferred on KDE regardless of wayland-vs-X11.
+        // Direct bus probe replaces the old XDG_CURRENT_DESKTOP gate.
+        if (probe_kwin_on_bus()) {
+            if (kwin_dbus_loop(l)) return nullptr;
+            LX_INFO("scope: kwin-dbus bridge unavailable — "
+                    "trying wayland protocol");
+        }
+
+        // 3. KDE Wayland (legacy / wlroots) — direct socket probe.
+        // kde_wayland_loop itself returns false if the compositor
+        // doesn't speak org_kde_plasma_window_management, so a non-KDE
+        // Wayland session falls through to X11 on the same iteration.
+        if (probe_wayland_socket()) {
+            if (kde_wayland_loop(l)) return nullptr;
+            LX_INFO("scope: wayland session has no "
+                    "org_kde_plasma_window_management — trying X11");
+        }
+
+        // 4. X11 / XWayland — try $DISPLAY then :0 / :1 fallbacks.
+        if (const char* disp = probe_x11_display(); disp != nullptr) {
+            LX_INFO("scope: x11 active-window detector online (DISPLAY=%s)",
+                    disp);
+            x11_loop(l, disp);
             return nullptr;
         }
-        LX_WARN("scope: hyprland socket connect failed, falling through");
-    }
 
-    // KDE Plasma — preferred backend on a KDE session, regardless of
-    // wayland-vs-X11. The KWin script + sd-bus bridge is the only path that
-    // sees native Wayland windows on Plasma 6 (where org_kde_plasma_window_
-    // management is locked down to trusted shell components). On older
-    // Plasma versions it works just as well, and is cheaper than the
-    // protocol backend (no per-window state, no roundtrips on bring-up).
-    // We gate this on XDG_CURRENT_DESKTOP so non-KDE compositors don't
-    // hold the well-known D-Bus name for nothing.
-    if (const char* xdg = std::getenv("XDG_CURRENT_DESKTOP");
-        xdg && std::strstr(xdg, "KDE")) {
-        if (kwin_dbus_loop(l)) {
-            return nullptr;
+        // None of the probes saw a compositor yet. Wait and retry.
+        if (!announced_polling) {
+            LX_INFO("scope: no compositor ready yet — polling every %ds "
+                    "for up to %ds (cold-boot race against Plasma's "
+                    "session-env import)",
+                    probe_interval_sec,
+                    probe_max_attempts * probe_interval_sec);
+            announced_polling = true;
         }
-        LX_INFO("scope: kwin-dbus bridge unavailable — trying wayland protocol");
-    }
 
-    // KDE Plasma Wayland (legacy / wlroots) — must be tried before X11. On a
-    // Plasma Wayland session XWayland is usually running too (so DISPLAY is
-    // set), but its _NET_ACTIVE_WINDOW only reflects legacy X11 apps. Native
-    // Wayland apps would be invisible to the X11 backend, which is exactly
-    // the failure mode we're working around here.
-    if (const char* wd = std::getenv("WAYLAND_DISPLAY"); wd && *wd) {
-        if (kde_wayland_loop(l)) {
-            return nullptr;
+        // Shutdown-aware sleep. wake_pipe[0] is written by stop() so
+        // teardown unblocks immediately instead of waiting up to
+        // probe_interval_sec.
+        fd_set rfds;
+        FD_ZERO(&rfds);
+        FD_SET(l->wake_pipe[0], &rfds);
+        timeval tv{};
+        tv.tv_sec  = probe_interval_sec;
+        tv.tv_usec = 0;
+        int rc = select(l->wake_pipe[0] + 1, &rfds, nullptr, nullptr, &tv);
+        if (rc > 0 && FD_ISSET(l->wake_pipe[0], &rfds)) {
+            drain(l->wake_pipe[0]);
+            if (l->stop.load(std::memory_order_relaxed)) return nullptr;
         }
-        LX_INFO("scope: wayland session has no org_kde_plasma_window_management "
-                "(not KWin?) — trying X11");
     }
 
-    if (const char* disp = std::getenv("DISPLAY"); disp && *disp) {
-        LX_INFO("scope: x11 active-window detector online (DISPLAY=%s)", disp);
-        x11_loop(l);
-        return nullptr;
-    }
+    LX_WARN("scope: no compositor detected after %ds — per-app rules "
+            "disabled, daemon will use the global preset on every event",
+            probe_max_attempts * probe_interval_sec);
 
-    LX_INFO("scope: no supported compositor detected — global preset only");
     // Idle until shutdown so the caller's join() returns cleanly.
     char b;
     while (!l->stop.load(std::memory_order_relaxed)) {

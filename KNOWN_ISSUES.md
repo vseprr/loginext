@@ -129,6 +129,67 @@ Apply to both:
 
 ---
 
+## systemd unit: `StartLimitIntervalSec` / `StartLimitBurst` MUST live under `[Unit]` (2026-05-07)
+
+systemd's start-limit guards are parsed from `[Unit]`, NOT `[Service]`. Placing them under `[Service]` causes systemd to log `Unknown key 'StartLimitIntervalSec' in section [Service], ignoring.` — the directives are silently dropped and the service runs with no burst cap.
+
+**The regression this caused:** when the user's on-disk v4 unit shipped with both directives under `[Service]`, a transient `grab failed: Device or resource busy` (see the two-daemon race entry below) failed ~89 restart attempts in a row before the user noticed and stopped the unit manually. With the guards correctly under `[Unit]`, the same failure stops after 5 attempts in 60 s and the unit drops to `failed` state so the frontend toggle can surface the problem.
+
+Mandatory location in every source-of-truth copy:
+
+```
+[Unit]
+…
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+…
+Restart=on-failure
+RestartSec=3
+# StartLimit* MUST NOT appear here
+```
+
+Applied to:
+- [`deploy/systemd/loginext.service`](deploy/systemd/loginext.service:27) — canonical template shipped by PKGBUILD and install.sh
+- [`ui/src-tauri/src/service.rs`](ui/src-tauri/src/service.rs:152) — heal-rewrite body (TEMPLATE_VERSION 4→5)
+
+`TEMPLATE_VERSION` bumped to 5 so existing units pick up the fix on the next UI launch via [`heal_at_startup()`](ui/src-tauri/src/service.rs:360). If you bump the template body in the future, verify the placement with `systemd-analyze verify ~/.config/systemd/user/loginext.service` — it emits the same "Unknown key" warning systemd uses at load time, so the check is cheap and doesn't require an actual restart.
+
+---
+
+## Two-daemon grab race: UI must NOT spawn-detach when systemd is managing the unit (2026-05-07)
+
+The C++ daemon calls `libevdev_grab(LIBEVDEV_GRAB)` unconditionally on the MX Master 3S event node during init. The grab is exclusive — only one process at a time can hold it — so any scenario that puts two daemons on disk simultaneously ends with one of them spinning in a restart loop emitting `[loginext] grab failed: Device or resource busy` / `status=1/FAILURE`.
+
+**How two daemons started co-existing:** [`lib.rs::run()`](ui/src-tauri/src/lib.rs:537) used to call [`heal_at_startup()`](ui/src-tauri/src/service.rs:360) followed immediately by [`daemon::ensure_running()`](ui/src-tauri/src/daemon.rs:403). `heal_at_startup()` ran `systemctl --user daemon-reload && try-restart loginext.service` when it detected a template-version bump — fine in isolation, but in the brief window between "old daemon exits on SIGTERM" and "new daemon binds the socket", `ensure_running()`'s socket probe saw a dead socket and spawn-detached an *additional* daemon on top of systemd's restart. Both processes then raced for `EVIOCGRAB`; whichever got there first won, the other exited with EBUSY, and systemd restarted it (see the StartLimit entry above for why it then looped ~90 times instead of giving up after 5).
+
+**The fix is two-pronged.** Belt and braces: either alone would prevent the specific scenario, both together also catch every neighbouring variant (external `systemctl --user restart` on a UI that's already open, a UI launched seconds after cold-boot autostart, etc.).
+
+1. **[`heal_at_startup()`](ui/src-tauri/src/service.rs:360) now blocks until `query_state()` reports `active=true` after its `try-restart` (budget: 3 s).** This shrinks the socket-dead window so `ensure_running()` would observe the new daemon as already up on the vast majority of hosts.
+
+2. **[`lib.rs::run()`](ui/src-tauri/src/lib.rs:537) now branches on `service::query_state()`.** When the unit is available AND either active or enabled, we call the new [`daemon::wait_for_running()`](ui/src-tauri/src/daemon.rs:401) — which polls the socket for up to 5 s and NEVER spawn-detaches — instead of `ensure_running()`. The legacy spawn-detach path is kept strictly as a fallback for hosts with no unit file installed (fresh cmake-only builds).
+
+The rule generalises: any future UI code path that acts on the daemon socket must check `service::query_state()` first and route through `daemon::wait_for_running()` when systemd is in charge. The grab is the single most sensitive shared resource in the stack, and it has exactly one allowed owner at a time. Spawn-detaching "just to be safe" is a regression vector.
+
+**Verification recipe when touching either the heal path or the UI startup order:**
+
+```sh
+# Kill any running daemons, disable the unit, close the UI.
+systemctl --user disable --now loginext.service
+pkill -9 loginext
+
+# Run the solo-daemon smoke test — must print "exclusive grab acquired".
+timeout 3 ./build/loginext
+
+# Now enable via UI toggle, then reboot. journalctl --user -u loginext.service
+# must NOT show "grab failed: Device or resource busy" on first boot.
+```
+
+If step 3 ever shows the EBUSY line again, grep the codebase for any new `daemon::ensure_running()` call that hasn't been gated on `query_state()` — that's the regression.
+
+---
+
 ## systemd unit self-heal: must run at every UI launch, not only on toggle click (2026-05-07)
 
 `heal_unit_if_stale()` was originally wired only into `service::enable_now()`, which fires on the DAEMON OFFLINE→ONLINE toggle click. That works for an *idle* unit (user clicks ON, heal runs, unit gets fixed, daemon starts) but it does not work for an *enabled, failing* unit.
@@ -176,6 +237,44 @@ Adding a per-app rule requires focusing the target app to populate "Currently fo
 **Why we didn't go with the alternative "Recent Apps history list":** keeping a list of last-N detected apps in the frontend is also useful, but it doesn't solve the actual paradox — the user STILL has to focus the target app to populate the list. The pin solves the immediate workflow gap; the history list would be a refinement that builds on it. The pin is the canonical solution for this kind of UX.
 
 **Wayland compositors that gate Always-on-Top behind a permission** can refuse the call. The frontend `console.warn`s on failure and reverts the visual pin state — the persisted bit isn't flipped on failure either, so a user's intent is never silently misrepresented.
+
+### KWin D-Bus scripting fallback (2026-05-07)
+
+Tauri's `Window::set_always_on_top()` calls `gtk_window_set_keep_above` internally. On KDE Plasma 6 Wayland, KWin may ignore this GTK-requested hint — the compositor has final authority over window stacking, and KWin's focus-stealing prevention can override client-requested states.
+
+**The fix is a two-tier approach** in [`ui/src-tauri/src/lib.rs::set_always_on_top`](ui/src-tauri/src/lib.rs:273):
+
+1. **Tier 1 — Tauri native:** `window.set_always_on_top(on_top)` sets the xdg_toplevel hint. Works on X11 and compositors that honour the hint. Always called first so non-KDE hosts get correct behaviour. **Failures here do NOT short-circuit the function.** Tauri 2 on Wayland can report an error from `set_always_on_top` (via the GTK3 backend) even on compositors where Tier 2 would have succeeded — the previous implementation used the `?` operator here and silently skipped Tier 2, which is what caused the production regression where the pin button did nothing and the KWin journal showed zero D-Bus activity.
+
+2. **Tier 2 — KWin D-Bus scripting via `loadScript` + `Script.run`:** When `XDG_CURRENT_DESKTOP` contains `KDE`, the JS snippet is written to `$XDG_RUNTIME_DIR/loginext-keepabove-<pid>.js`, then registered with KWin via `org.kde.kwin.Scripting.loadScript(path, name)` (service name: `org.kde.KWin`, path: `/Scripting`). The returned integer script id is parsed out of the qdbus stdout and used to build `/Scripting/Script<id>`, which we then invoke via `org.kde.kwin.Script.run`. A follow-up `Script.stop` keeps KWin's script registry tidy across repeated toggles. The snippet matches windows by caption *or* resourceClass (`loginext` substring) — the dual match widens the catch because Wayland sessions sometimes report a blank caption during early startup while always exposing the correct xdg_toplevel app_id.
+
+   **Why `loadScript` and not `runScript(QString)` (inline JS):** `runScript` has been inconsistent across Plasma 6 point releases — some builds require a privileged caller, others have dropped it entirely from the scripting surface. `loadScript` is the public, documented, stable API since Plasma 5.x; the extra temp-file hop costs roughly one disk write of ~500 B and is immaterial next to the D-Bus round-trip itself. A previous version of this file attempted `runScript` with inline JS against a wrong *service* name (`org.kde.kwin.Scripting`, which is the *interface* — the service is `org.kde.KWin`). Every call failed with "Service not found", no traffic reached KWin, the user saw a silent no-op. Both bugs are fixed in the current implementation; keep them fixed.
+
+3. **Tool fallbacks:** we try `qdbus6` → `qdbus-qt6` → `qdbus` in that order. stdout/stderr are captured via `.output()` (not `.status()`) so we can parse the script id and log a useful diagnostic if every tool fails. Each attempt emits a line to stderr — `[loginext-ui] pin: qdbus6 [… args …] ok (stdout="12")` on success — so a terminal-launched debug build shows exactly which tier did the work.
+
+The D-Bus call is best-effort: it silently no-ops when qdbus isn't available, KWin isn't running, or the scripting interface is disabled. In all these cases, Tier 1's hint is already set, so the running window manager gets the right signal.
+
+**Do not** remove the Tauri native call and rely solely on the KWin path — that would break the pin on X11, non-KDE Wayland compositors (Hyprland, Sway), and KDE X11 sessions. **Do not** reintroduce the `?` operator after the Tauri call — the explicit `match { Ok, Err }` pattern is load-bearing and the only reason Tier 2 runs on Wayland KDE at all. **Do not** switch to `runScript(QString)` even if Plasma ships a new build that exposes it — the variance across point releases is a regression waiting to happen.
+
+---
+
+## systemd unit: `WantedBy=default.target`, not `graphical-session.target` (2026-05-07 / reverted and superseded)
+
+The unit's `[Install]` section started as `WantedBy=default.target`, was briefly moved to `WantedBy=graphical-session.target` in a same-day iteration, and is now back on `WantedBy=default.target`. The second iteration regressed cold-boot autostart and had to be reverted. Both decisions are documented so a future session doesn't re-litigate the question.
+
+**The failure mode the `graphical-session.target` move was trying to fix:** `PartOf=graphical-session.target` stops the service when the target stops OR restarts. If `graphical-session.target` restarts mid-login (KDE does this on some Plasma 6 / SDDM hand-offs), the service stops — and a `WantedBy=default.target` symlink does not re-fire because `default.target` was already reached earlier in user-manager bring-up. Net: service stays stopped until the UI's `ensure_running()` spawns it manually.
+
+**The failure mode `graphical-session.target` introduced:** `graphical-session.target` is a reverse-dependency-only target. Per `systemd.special(7)` it is declared with `RefuseManualStart=yes` and is activated *only* when a desktop-session service (Plasma's `plasma-workspace.service`, GNOME's `gnome-session-manager@.service`, etc.) explicitly pulls it in with `Wants=graphical-session.target`. On several Plasma 6 boot paths — specifically SDDM → Wayland on Arch / CachyOS, which is the agents.md target platform — the user-manager session bring-up does NOT pull the target in. The `.wants/loginext.service` symlink created by `systemctl --user enable` sits there forever, the target never activates, and the daemon never starts at boot. `is-enabled` correctly returns `enabled`, so the UI toggle reads ON and the user has no reason to click it — exactly the silent-no-op class of bug `heal_at_startup` was written to prevent.
+
+**The settled answer:** `WantedBy=default.target`. `default.target` is the canonical user-manager autostart target and is always reached on bring-up regardless of display-manager wiring. Session-lifecycle coupling is preserved by keeping `PartOf=graphical-session.target` in `[Unit]`: stop and restart propagation are independent of the Install target. If the graphical session restarts mid-login, `PartOf=` stops the unit, the daemon exits on SIGTERM, `Restart=on-failure` with `RestartForceExitStatus=143` catches the signal-143 exit code, and the unit restarts. This is the correct interaction between `PartOf=` and `Restart=` — no `WantedBy=` acrobatics needed.
+
+Applied to both source-of-truth files:
+- [`deploy/systemd/loginext.service`](deploy/systemd/loginext.service:80) — canonical template shipped by PKGBUILD and install.sh
+- [`ui/src-tauri/src/service.rs`](ui/src-tauri/src/service.rs:193) — heal template body (TEMPLATE_VERSION 3→4)
+
+`TEMPLATE_VERSION` is 4 so existing users whose units were rewritten at v3 pick up the correction on the next UI launch via `heal_at_startup()`. A user whose daemon has been silently failing to autostart since the v3 rewrite sees it come back the first time they open the UI after the new binary lands — no manual `systemctl edit`, no install.sh re-run.
+
+**The mandatory pattern for future services that use `PartOf=`:** rely on `PartOf=` + `Restart=on-failure` + `RestartForceExitStatus=143` for stop/restart propagation from the parent target. Do NOT couple `WantedBy=` to a reverse-dependency-only target just because `PartOf=` points there — the two directives have different lifecycles, and `WantedBy=default.target` is the right answer for "autostart when the user logs in".
 
 ---
 

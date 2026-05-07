@@ -2,7 +2,9 @@ mod daemon;
 mod ipc_bridge;
 mod service;
 
+use std::process::{Command, Stdio};
 use std::sync::Mutex;
+use std::time::Duration;
 
 // ─────────────────────────────────────────────────────────────────────
 //  WebKitGTK Wayland workarounds
@@ -95,31 +97,30 @@ fn ensure_kwin_script_enabled() {
             .unwrap_or(false)
     };
 
-    // Step 0 — locate a KWin script package on disk. The PKGBUILD installs
-    // it system-wide; the dev workflow leaves it in the source tree. Both
-    // are valid sources for kpackagetool6 to register from.
+    // Step 0 — locate a KWin script package on disk.
     //
-    // Search order:
+    // CRITICAL: `kpackagetool6 --upgrade` and `--install` install INTO
+    // the user's `~/.local/share/kwin/scripts/` directory. If we pass
+    // the user-local path AS the source, source == destination and
+    // kpackagetool can wipe the directory before re-copying — which
+    // is exactly what was happening: the script appeared after
+    // install.sh, then disappeared the first time the UI ran. So we
+    // search for kpackagetool sources ONLY in immutable, non-destination
+    // locations:
+    //
     //   1. /usr/share/kwin/scripts/loginext-focus  (pacman / system)
-    //   2. ~/.local/share/kwin/scripts/loginext-focus  (already installed)
-    //   3. <UI exe>/../../../../deploy/kwin/loginext-focus  (cargo target/release)
-    //   4. <UI exe>/../../../../../deploy/kwin/loginext-focus  (cargo target/debug subdir)
+    //   2. <UI exe>/../../../../deploy/kwin/loginext-focus  (cargo target/release)
+    //   3. <UI exe>/../../../../../deploy/kwin/loginext-focus  (cargo target/debug subdir)
     //
-    // The walk-up loop in (3)/(4) lets `tauri dev` and a raw release-build
-    // launch find the source without an env var override.
+    // Separately, we ALSO check whether files are already present in the
+    // user-local path (e.g. install.sh's fallback copy). If so, KWin
+    // will discover them on its own — no kpackagetool registration
+    // needed — and we just need to flip the `loginext-focusEnabled`
+    // bit and reconfigure KWin in step 2.
     let mut script_src: Option<PathBuf> = None;
-    let candidates: [PathBuf; 2] = [
-        PathBuf::from("/usr/share/kwin/scripts/loginext-focus"),
-        std::env::var("HOME")
-            .ok()
-            .map(|h| PathBuf::from(format!("{h}/.local/share/kwin/scripts/loginext-focus")))
-            .unwrap_or_default(),
-    ];
-    for c in &candidates {
-        if c.join("metadata.json").is_file() {
-            script_src = Some(c.clone());
-            break;
-        }
+    let system_path = PathBuf::from("/usr/share/kwin/scripts/loginext-focus");
+    if system_path.join("metadata.json").is_file() {
+        script_src = Some(system_path);
     }
     if script_src.is_none() {
         if let Ok(exe) = std::env::current_exe() {
@@ -139,33 +140,63 @@ fn ensure_kwin_script_enabled() {
         }
     }
 
+    // Detect a pre-existing user-local install separately. Files at this
+    // path are KWin-discoverable on their own — we never pass this path
+    // to kpackagetool (would corrupt it; see comment above).
+    let user_local_present = std::env::var("HOME")
+        .ok()
+        .map(|h| {
+            PathBuf::from(format!(
+                "{h}/.local/share/kwin/scripts/loginext-focus/metadata.json"
+            ))
+            .is_file()
+        })
+        .unwrap_or(false);
+
     // Step 1 — register the script with KPackage so KWin can find it.
-    // `kpackagetool6 --upgrade` is idempotent: it overwrites a stale local
-    // copy and gracefully fails over to `--install` for first-time runs.
-    // Without this, even though the files are on disk in step 0's candidate
-    // path, KWin's plugin scanner may not see them — that's the exact bug
-    // a fresh `makepkg -si` keeps hitting on Plasma 6.
-    if let Some(src) = script_src.as_deref() {
-        let registered = register_kwin_script(src, &run_silent);
-        if !registered {
-            eprintln!(
-                "[loginext-ui] kwin: kpackagetool6 not available — \
-                 falling back to direct copy into ~/.local/share/kwin/scripts/."
-            );
-            // Direct copy is a safety net: KWin always discovers scripts
-            // in the per-user XDG directory, no kpackagetool registration
-            // required. Slower than kpackagetool6 (it does extra metadata
-            // validation) but works on hosts where Plasma's tooling isn't
-            // fully installed.
-            copy_script_to_user_dir(src);
+    // Skipped when we have a pre-existing user-local install AND no
+    // separate immutable source: nothing to register, files are already
+    // where KWin reads them. When we do have an immutable source,
+    // kpackagetool registration is preferred (it primes the KPackage
+    // database, which makes KWin's plugin scanner see the script
+    // without a logout/login cycle).
+    match (script_src.as_deref(), user_local_present) {
+        (Some(src), _) => {
+            let registered = register_kwin_script(src, &run_silent);
+            if !registered {
+                eprintln!(
+                    "[loginext-ui] kwin: kpackagetool6 invocation failed — \
+                     {} either not installed or refused both --upgrade and --install. \
+                     {}",
+                    "kpackage",
+                    if user_local_present {
+                        "Files already present in ~/.local/share/kwin/scripts/loginext-focus, leaving as-is."
+                    } else {
+                        "Falling back to direct copy into ~/.local/share/kwin/scripts/."
+                    }
+                );
+                if !user_local_present {
+                    // Only copy when nothing exists at the destination.
+                    // Don't overwrite a pre-existing install — a previous
+                    // install.sh run owns it.
+                    copy_script_to_user_dir(src);
+                }
+            }
         }
-    } else {
-        eprintln!(
-            "[loginext-ui] kwin: focus-bridge script not found in /usr/share, \
-             ~/.local/share, or the source tree — install the package or \
-             run from the repo root."
-        );
-        return;
+        (None, true) => {
+            eprintln!(
+                "[loginext-ui] kwin: using existing user-local install at \
+                 ~/.local/share/kwin/scripts/loginext-focus (no kpackagetool source available)"
+            );
+        }
+        (None, false) => {
+            eprintln!(
+                "[loginext-ui] kwin: focus-bridge script not found in /usr/share, \
+                 ~/.local/share, or the source tree — install the package or \
+                 run from the repo root."
+            );
+            return;
+        }
     }
 
     // Step 2 — flip the enablement bit. Try the Plasma 6 tool first;
@@ -260,11 +291,188 @@ fn ipc_request(line: String) -> String {
 /// it on every launch (see `attachAlwaysOnTopPin` in main.ts), so the
 /// preference survives across UI restarts without needing a Tauri-side
 /// store.
+///
+/// Two-tier implementation:
+///   1. Tauri's `Window::set_always_on_top()` — works on X11 and
+///      compositors that honour the xdg_toplevel "always on top" hint.
+///   2. KWin D-Bus scripting fallback — on KDE Plasma Wayland, KWin
+///      may ignore the GTK-requested hint. We call KWin's
+///      `org.kde.kwin.Scripting.runScript` to set `keepAbove` directly
+///      inside KWin's own JavaScript engine, which has authority over
+///      window stacking. The snippet finds the LogiNext window by
+///      matching the window title.
 #[tauri::command]
 fn set_always_on_top(window: tauri::Window, on_top: bool) -> Result<(), String> {
-    window
-        .set_always_on_top(on_top)
-        .map_err(|e| format!("set_always_on_top: {e}"))
+    // Tier 1: Tauri's native always-on-top. Works on X11 and
+    // compositors that honour the xdg_toplevel "always on top" hint.
+    //
+    // CRITICAL: we do NOT bail on failure here. Tauri 2's
+    // `Window::set_always_on_top` on Wayland goes through
+    // `gtk_window_set_keep_above`, which some Wayland backends report
+    // as an error even though the D-Bus fallback below would have
+    // succeeded. The previous implementation used `?` here and
+    // short-circuited the entire function, which is what caused the
+    // frontend to see "no effect" AND the KWin journal to show no
+    // D-Bus activity — the Rust code simply never reached Tier 2.
+    match window.set_always_on_top(on_top) {
+        Ok(()) => {
+            eprintln!("[loginext-ui] pin: Tauri set_always_on_top({on_top}) ok");
+        }
+        Err(e) => {
+            eprintln!(
+                "[loginext-ui] pin: Tauri set_always_on_top({on_top}) failed: {e} \
+                 — falling through to KWin D-Bus fallback"
+            );
+        }
+    }
+
+    // Tier 2: KWin D-Bus scripting. On KDE Plasma (Wayland in
+    // particular) KWin owns window stacking and the GTK keep-above
+    // hint is advisory at best. We invoke KWin's own scripting engine
+    // via D-Bus — the same mechanism the "Keep Above" window-menu
+    // action uses internally — which has authority over the stacking
+    // order that no client-side hint does.
+    let xdg = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
+    let on_kde = xdg.split(':').any(|s| s.eq_ignore_ascii_case("KDE"));
+    if !on_kde {
+        return Ok(());
+    }
+
+    let title = window.title().unwrap_or_else(|_| "LogiNext".into());
+    // Escape backslashes and quotes so the JS string literal is safe.
+    let escaped_title = title.replace('\\', "\\\\").replace('"', "\\\"");
+    let keep_above = if on_top { "true" } else { "false" };
+
+    // The JS runs once at `Script.run()` time. It matches by the two
+    // properties that KWin reliably exposes on both Plasma 5 and 6:
+    // `caption` (window title) and `resourceClass` (WM_CLASS /
+    // xdg_toplevel app_id). Matching on either widens the catch: a
+    // Wayland session reports `loginext-ui` as resourceClass even when
+    // the caption is blank during early startup, and X11 sessions set
+    // the caption to the window title string.
+    let js = format!(
+        "(function() {{\n\
+           var list;\n\
+           try {{ list = workspace.windowList(); }}\n\
+           catch (e) {{ try {{ list = workspace.clientList(); }} catch (e2) {{ list = []; }} }}\n\
+           for (var i = 0; i < list.length; i++) {{\n\
+             var w = list[i];\n\
+             if (!w) continue;\n\
+             var cap = (w.caption || '') + '';\n\
+             var klass = ((w.resourceClass || '') + '').toLowerCase();\n\
+             if (cap === \"{escaped_title}\" || klass.indexOf('loginext') !== -1) {{\n\
+               w.keepAbove = {keep_above};\n\
+             }}\n\
+           }}\n\
+         }})();\n"
+    );
+
+    // KWin's `org.kde.kwin.Scripting.loadScript(path, name)` takes a
+    // file path and returns an integer script id. We deliberately use
+    // this path (rather than the `runScript(QString)` inline variant)
+    // because `runScript` has been inconsistent across Plasma 6 point
+    // releases — some builds require a privileged caller, others have
+    // dropped it entirely. `loadScript` is the public, documented API
+    // and has worked unchanged since Plasma 5.x.
+    //
+    // Temp file lives under $XDG_RUNTIME_DIR so it's per-user, tmpfs,
+    // and auto-cleaned by systemd on logout. Fall back to /tmp if
+    // XDG_RUNTIME_DIR isn't set (e.g. a tty-only session).
+    let xdg_runtime = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".into());
+    let pid = std::process::id();
+    let tmp_path = format!("{xdg_runtime}/loginext-keepabove-{pid}.js");
+    if let Err(e) = std::fs::write(&tmp_path, &js) {
+        eprintln!("[loginext-ui] pin: could not write {tmp_path}: {e}");
+        return Ok(());
+    }
+
+    // Small helper — run a qdbus invocation, return (success, stderr).
+    // We try Plasma 6's `qdbus6` first, then the legacy `qdbus-qt6`
+    // alias some distros ship, then plain `qdbus`. All three speak the
+    // same D-Bus wire protocol; the only difference is which Qt they
+    // were built against and hence which meta-object cache they use.
+    let tools = ["qdbus6", "qdbus-qt6", "qdbus"];
+    let run_qdbus = |args: &[&str]| -> (bool, String) {
+        let mut last_err = String::new();
+        for tool in &tools {
+            let out = Command::new(tool)
+                .args(args)
+                .stdin(Stdio::null())
+                .output();
+            match out {
+                Ok(o) if o.status.success() => {
+                    let stdout = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                    eprintln!(
+                        "[loginext-ui] pin: {tool} {:?} ok (stdout={stdout:?})",
+                        args
+                    );
+                    return (true, stdout);
+                }
+                Ok(o) => {
+                    last_err = format!(
+                        "{tool} exit={}: stderr={}",
+                        o.status,
+                        String::from_utf8_lossy(&o.stderr).trim()
+                    );
+                }
+                Err(e) => {
+                    last_err = format!("{tool} spawn: {e}");
+                }
+            }
+        }
+        (false, last_err)
+    };
+
+    // Step 1: load the script. Returns the script id as the stdout payload.
+    let (ok, load_out) = run_qdbus(&[
+        "org.kde.KWin",
+        "/Scripting",
+        "org.kde.kwin.Scripting.loadScript",
+        &tmp_path,
+    ]);
+    if !ok {
+        eprintln!("[loginext-ui] pin: KWin loadScript failed ({load_out}) — temp file was {tmp_path}");
+        let _ = std::fs::remove_file(&tmp_path);
+        return Ok(());
+    }
+
+    // KWin returns the numeric id on stdout; newer Plasma versions
+    // print it bare, older ones wrap it with whitespace. Extract the
+    // first integer token and use it to build the per-script object
+    // path that `run`/`stop` live on.
+    let id = load_out.split_whitespace().next().unwrap_or("");
+    if id.is_empty() || id.parse::<i32>().is_err() {
+        eprintln!(
+            "[loginext-ui] pin: KWin loadScript returned non-integer id {load_out:?} — \
+             temp file kept at {tmp_path} for inspection"
+        );
+        return Ok(());
+    }
+    let script_path = format!("/Scripting/Script{id}");
+
+    // Step 2: run it. This is what actually applies keepAbove inside
+    // KWin's QJSEngine — loadScript on its own is just a registration.
+    let (ran, run_out) = run_qdbus(&[
+        "org.kde.KWin",
+        &script_path,
+        "org.kde.kwin.Script.run",
+    ]);
+    if !ran {
+        eprintln!("[loginext-ui] pin: KWin Script.run on {script_path} failed ({run_out})");
+    }
+
+    // Step 3: stop + remove so we don't leak KWin's script registry
+    // entries across repeated toggles. Failures here are non-fatal —
+    // Plasma cleans these up on logout anyway, but a tidy run makes
+    // `dbus-monitor` output readable while debugging.
+    let _ = run_qdbus(&[
+        "org.kde.KWin",
+        &script_path,
+        "org.kde.kwin.Script.stop",
+    ]);
+    let _ = std::fs::remove_file(&tmp_path);
+
+    Ok(())
 }
 
 #[tauri::command]
@@ -472,10 +680,26 @@ pub fn run() {
     // commands required. Cheap when there's nothing to fix.
     service::heal_at_startup();
 
-    // Spawn-or-detect runs on the main thread before the window opens — keeps
-    // the first frame coherent with the daemon state we report. The probe is
-    // fast (single connect attempt) when the daemon is already up.
-    let initial = daemon::ensure_running();
+    // Decide the lifecycle path. When systemd is managing the daemon
+    // (unit is installed and either active or enabled), we MUST NOT
+    // spawn-detach a competing instance: both processes would race for
+    // `EVIOCGRAB` on the mouse and the loser would spin in a restart
+    // loop until the `[Unit] StartLimitBurst` cap kicks in (previous
+    // regression: ~90 restart attempts before the guard engaged,
+    // because the Start-limit directives were mis-placed under
+    // [Service] and silently ignored — fixed separately in
+    // TEMPLATE_VERSION=5). When systemd isn't in play (unit absent,
+    // e.g. fresh cmake-only build), fall back to the legacy
+    // spawn-detached path so the toggle remains functional.
+    let svc = service::query_state();
+    let initial = if svc.available && (svc.active || svc.enabled) {
+        // Up to 5 s is enough for the daemon to bind the socket after
+        // a fresh `systemctl --user start` or the heal-triggered
+        // try-restart that heal_at_startup() may have just issued.
+        daemon::wait_for_running(Duration::from_secs(5))
+    } else {
+        daemon::ensure_running()
+    };
 
     eprintln!(
         "[loginext-ui] socket: {}",

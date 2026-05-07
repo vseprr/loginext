@@ -8,13 +8,15 @@ The UI launches the daemon on demand and detaches from it. Once the daemon is ru
 
 ---
 
-## Status
+## Status — v1.0.0 stable
 
 | Phase | What it covers | State |
 |---|---|---|
-| 1 | Thumb wheel → `Ctrl+Tab` / `Ctrl+Shift+Tab`, three sensitivity profiles, gesture heuristics | ✅ shipped |
-| 2 | Neumorphism dark UI, daemon spawn / respawn lifecycle (now systemd-driven), per-control preset assignment, Zoom + passthrough presets, per-app rules with per-app sensitivity / invert overrides, KWin DBus focus bridge for Plasma 6, udev-rules for unprivileged hardware access, native Arch PKGBUILD with auto KPackage registration, always-on-top pin | ✅ stable |
+| 1 | Thumb wheel → `Ctrl+Tab` / `Ctrl+Shift+Tab`, three sensitivity profiles, gesture heuristics | ✅ v1.0.0 |
+| 2 | Neumorphism dark UI, systemd-driven daemon lifecycle, per-control preset assignment, Zoom + passthrough presets, per-app rules with per-app sensitivity / invert overrides, KWin DBus focus bridge for Plasma 6 (with cold-boot auto-bootstrap), udev rules for unprivileged hardware access, native Arch PKGBUILD with auto KPackage registration, always-on-top pin, secure `RuntimeDirectory=`-managed IPC socket | ✅ v1.0.0 |
 | 3 | Other MX Master 3S controls (Back / Forward, gesture button, vertical wheel, Mode-shift) + new preset families (volume, custom keystroke, run command) | 🚧 planned |
+
+v1.0.0 closes the cold-boot race that previously required the user to launch the UI before per-app rules would fire, the listener-thread CPU spinner that triggered systemd-oomd kills, and the IPC socket timeout the UI hit on slow boots. Per-app rules now apply within ~50 ms of daemon start, with no UI launch required. Idle CPU is ~40 ms per minute.
 
 Detailed roadmap: [progress.md](./progress.md). Release-by-release feature history: [CHANGELOG.md](./CHANGELOG.md). Architectural decisions and deferred audit findings: [KNOWN_ISSUES.md](./KNOWN_ISSUES.md).
 
@@ -44,7 +46,7 @@ cd loginext
 
 Installs `pacman` deps, builds the daemon and the Tauri UI in release mode, drops both binaries into `~/.local/bin`, registers an icon and `.desktop` entry, stages the systemd user unit.
 
-Either way, **LogiNext appears in your application menu** — search for it and launch like any other GUI app. Pass `--enable-service` to the script (or `systemctl --user enable --now loginext.service` after the package install) if you want the daemon to auto-start at login (otherwise the UI spawns it on demand, which is the recommended workflow).
+Either way, **LogiNext appears in your application menu** — search for it and launch like any other GUI app. The script enables `loginext.service` as a systemd `--user` unit by default, so the daemon auto-starts at every login and per-app rules apply immediately on cold boot without you having to open the UI first. Pass `--no-enable` to `install.sh` (or `systemctl --user disable --now loginext.service` after a package install) if you'd rather have the UI spawn the daemon on demand.
 
 ---
 
@@ -58,6 +60,7 @@ Either way, **LogiNext appears in your application menu** — search for it and 
 - **Passthrough.** Every event other than the thumb wheel (clicks, motion, vertical scroll) is forwarded as-is on a virtual mouse, so the rest of the device behaves normally.
 - **Zero heap allocation** in the event loop.
 - **Single binary**, the only runtime dependency is `libevdev`.
+- **Cold-boot KWin bootstrap.** The listener thread doesn't depend on session env vars (`XDG_CURRENT_DESKTOP`, `WAYLAND_DISPLAY`, `DISPLAY`) — those aren't exported into systemd-user when our service starts at boot. Instead, three direct probes (`org.kde.KWin` `NameHasOwner` on the user bus, `stat()` of `$XDG_RUNTIME_DIR/wayland-{0..3}`, `xcb_connect()` retry) run in a 60 s polling loop until a compositor surfaces, then a one-shot inline KWin script (loaded via `org.kde.kwin.Scripting.loadScript`) pushes the current active window straight into the daemon's `Activated` handler — bypassing the persistent `loginext-focus` script if it isn't enabled in `kwinrc`. End-to-end: per-app rules apply within ~50 ms of the daemon binding its bus name, with no UI launch and no manual `kwriteconfig` step required.
 
 ---
 
@@ -98,10 +101,12 @@ The build is `-O2 -Wall -Wextra -Wpedantic -Werror` and must finish clean. LTO a
 ```bash
 cd ui
 npm install
-npm run tauri dev   # development with hot-reload
+npm run tauri dev    # development with hot-reload
 # or
-npm run tauri build # release bundle
+npm run tauri:build  # release bundle (composite: vite build → tauri build)
 ```
+
+`tauri:build` chains the Vite step explicitly. **Do not invoke `cargo build` directly inside `ui/src-tauri/`** — it produces a binary that loads from `devUrl` (port 1420) and renders an empty webview unless `npm run dev` is also running. Foot-gun documented in [ui/src-tauri/README.md](./ui/src-tauri/README.md).
 
 The UI looks for the daemon binary in this order: `$LOGINEXT_DAEMON` (absolute path), then `../../build/loginext` relative to the UI executable (the dev workflow), then `loginext` on `$PATH`, then `/usr/local/bin/loginext`, then `/usr/bin/loginext`.
 
@@ -143,6 +148,7 @@ sudo ./build/loginext --mode=medium
 | `--quiet` | Suppress stderr (file log keeps recording) |
 | `--verbose` | Lower the file-log threshold to Trace (per-event detail) |
 | `--debug-events` | Dump raw libevdev events to stderr (hardware discovery; use with the UI in SYSTEM OFFLINE) |
+| `--debug-perf` | Per-second wakeup / event / sd_bus_process counters from both threads (catches busy-loop regressions) |
 | `--help` | Show usage and exit |
 
 `SIGHUP` reloads the config file without restarting.
@@ -186,7 +192,7 @@ App ids are case-insensitive — they're the X11 `WM_CLASS` (instance name prefe
 
 A reference file with common bindings lives at [config/app_rules.example.txt](./config/app_rules.example.txt). Reload after editing with `pkill -HUP loginext` (or any UI action that triggers a reload).
 
-Compositor coverage today: X11 (via `_NET_ACTIVE_WINDOW`) and Hyprland (`HYPRLAND_INSTANCE_SIGNATURE` → IPC event stream). On other Wayland compositors the listener idles and rules don't fire — every event resolves against the global preset, which is graceful but not what you want long-term.
+Compositor coverage in v1.0.0: KDE Plasma 6 (KWin D-Bus bridge — primary path on Plasma, sees native Wayland windows that `org_kde_plasma_window_management` no longer exposes to regular clients), KDE Plasma 5 / wlroots-style Wayland (`org_kde_plasma_window_management` v1), Hyprland (`HYPRLAND_INSTANCE_SIGNATURE` → IPC event stream), X11 / XWayland (`_NET_ACTIVE_WINDOW` PropertyNotify). The listener probes them in that priority order with a 60 s grace window, so the daemon catches up on cold boot the moment any compositor surfaces — no env-var dependency.
 
 ---
 

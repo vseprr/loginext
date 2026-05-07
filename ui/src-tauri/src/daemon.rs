@@ -39,14 +39,20 @@ const SPAWN_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 /// Returns the resolved daemon socket path. Mirrors the C++ side
 /// (ipc/server.cpp::resolve_socket_path) so they always agree.
+///
+/// As of template v8 the socket lives at `<runtime>/loginext/loginext.sock`
+/// (note the nested `loginext/` directory). The systemd unit's
+/// `RuntimeDirectory=loginext` creates that dir; the daemon's
+/// `resolve_socket_path` mkdir's it on the spawn-detached path. Both
+/// agree, so the UI just composes the same path here.
 pub fn socket_path() -> PathBuf {
     if let Ok(xdg) = std::env::var("XDG_RUNTIME_DIR") {
         if !xdg.is_empty() {
-            return PathBuf::from(format!("{xdg}/loginext.sock"));
+            return PathBuf::from(format!("{xdg}/loginext/loginext.sock"));
         }
     }
     let uid = unsafe { getuid() };
-    PathBuf::from(format!("/tmp/loginext-{uid}.sock"))
+    PathBuf::from(format!("/tmp/loginext-{uid}/loginext.sock"))
 }
 
 /// Quick probe: is something accepting connections on the socket right now?
@@ -396,6 +402,36 @@ pub enum SpawnOutcome {
     SpawnFailed { reason: String },
     BinaryNotFound,
     Timeout,
+}
+
+/// Poll the daemon socket for up to `budget` without ever spawning a new
+/// daemon. The UI uses this when systemd is known to be managing the
+/// daemon lifecycle — spawning our own detached instance in that case
+/// would race systemd's for `EVIOCGRAB` on the mouse and one of the two
+/// would spin in a restart loop with `[loginext] grab failed: Device or
+/// resource busy` until the unit's StartLimit kicks in. Returning
+/// AlreadyRunning as soon as the socket answers (or Timeout after the
+/// budget) keeps the two lifecycle paths cleanly separate.
+pub fn wait_for_running(budget: Duration) -> SpawnOutcome {
+    let path = socket_path();
+    let deadline = Instant::now() + budget;
+    while Instant::now() < deadline {
+        if socket_alive(&path) {
+            eprintln!(
+                "[loginext-ui] daemon: socket is live ({}) — systemd-managed, not spawning",
+                path.display()
+            );
+            return SpawnOutcome::AlreadyRunning;
+        }
+        std::thread::sleep(SPAWN_POLL_INTERVAL);
+    }
+    eprintln!(
+        "[loginext-ui] daemon: systemd-managed socket {} did not come up within {}ms — \
+         user can toggle the service via the header switch, or run `systemctl --user status loginext.service` for details",
+        path.display(),
+        budget.as_millis()
+    );
+    SpawnOutcome::Timeout
 }
 
 /// Check the socket and spawn the daemon if needed. Logs one concise line to

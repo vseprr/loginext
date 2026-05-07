@@ -16,6 +16,7 @@ void print_usage(const char* prog) {
         "  --quiet           suppress stderr (file log keeps running)\n"
         "  --verbose         file log includes per-event traces\n"
         "  --debug-events    dump raw libevdev events to stderr (hardware discovery; use with UI offline)\n"
+        "  --debug-perf      emit per-second perf counters (epoll/select wakeups, events, sd_bus calls)\n"
         "  --help            show this message\n"
         "\n"
         "SIGHUP reloads the config file without restarting.\n"
@@ -48,13 +49,14 @@ int parse_args(int argc, char* argv[], CliOptions& out) {
         {"quiet",   no_argument,       nullptr, 'q'},
         {"verbose", no_argument,       nullptr, 'v'},
         {"debug-events", no_argument,  nullptr, 'd'},
+        {"debug-perf",   no_argument,  nullptr, 'p'},
         {"help",    no_argument,       nullptr, 'h'},
         {nullptr, 0, nullptr, 0},
     };
 
     int c;
     int idx = 0;
-    while ((c = getopt_long(argc, argv, "m:i:c:qvdh", long_opts, &idx)) != -1) {
+    while ((c = getopt_long(argc, argv, "m:i:c:qvdph", long_opts, &idx)) != -1) {
         switch (c) {
             case 'm':
                 if (!parse_mode(optarg, out.mode)) {
@@ -81,6 +83,9 @@ int parse_args(int argc, char* argv[], CliOptions& out) {
                 break;
             case 'd':
                 out.debug_events = true;
+                break;
+            case 'p':
+                out.debug_perf = true;
                 break;
             case 'h':
                 out.help = true;
