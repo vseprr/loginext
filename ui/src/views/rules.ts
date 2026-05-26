@@ -350,7 +350,15 @@ async function saveNow(): Promise<void> {
   try {
     const r = await ipc.saveAppRules(rules);
     if (r.ok) {
-      toast("Rules saved ✓", "success");
+      // File write succeeded. Distinguish "daemon picked it up" from
+      // "daemon was offline so the file will be read on its next
+      // start" — both are success states; the wording just sets the
+      // user's expectations correctly.
+      if (r.reloaded) {
+        toast("Rules saved ✓", "success");
+      } else {
+        toast("Rules saved — will apply when daemon comes online", "success");
+      }
     } else {
       toast(`Save failed: ${r.err}`, "error");
     }

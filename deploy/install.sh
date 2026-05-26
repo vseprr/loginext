@@ -51,6 +51,9 @@ Usage: deploy/install.sh [--no-enable]
   (default)         Build + install the daemon and UI, then enable+start
                     loginext.service as a systemd --user unit. The daemon
                     auto-starts at every login from now on.
+                    Also calls 'loginctl enable-linger \$USER' so the daemon
+                    runs across boots even on tty-only / headless setups
+                    (idempotent; no-op on a GUI host with a display manager).
   --no-enable       Skip the systemd enable+start step. The unit file is
                     still installed; bring it up manually with
                     'systemctl --user enable --now loginext.service'.
@@ -260,6 +263,27 @@ chmod 0644 "$UNIT_DST"
 ok "$UNIT_DST"
 
 systemctl --user daemon-reload || warn "systemctl --user daemon-reload failed (no user manager?)"
+
+# ---- 8.5 enable lingering (best-effort) -------------------------------------
+# `loginctl enable-linger $USER` makes the user's systemd manager start at
+# boot independent of an active login session. On a GUI host with a display
+# manager (SDDM/GDM/lightdm) the user manager already starts when you log
+# in, so this is mostly belt-and-braces for tty-only setups and ssh-only
+# admins. Idempotent: a second invocation is a no-op.
+#
+# We do this BEFORE the enable+start step below so the symlink we're about
+# to write lands under a manager that's guaranteed to come up at boot.
+if command -v loginctl &>/dev/null; then
+    if ! loginctl show-user "$USER" 2>/dev/null | grep -q "Linger=yes"; then
+        if sudo loginctl enable-linger "$USER" 2>/dev/null; then
+            ok "lingering enabled for $USER (daemon survives logout)"
+        else
+            warn "loginctl enable-linger failed — daemon will only run during active sessions. Re-run install.sh as root if you need headless operation."
+        fi
+    else
+        ok "lingering already enabled for $USER"
+    fi
+fi
 
 if [[ $ENABLE_SERVICE -eq 1 ]]; then
     step "Enabling loginext.service"

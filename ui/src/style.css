@@ -921,6 +921,31 @@ body::-webkit-scrollbar-thumb {
   font-family: var(--font-mono);
 }
 
+/* "No supported device" notice — shown when the Tauri-side device
+   probe finds no Logitech device on /proc/bus/input/devices. Reads
+   as a non-interactive warning rather than a fake selectable row. */
+.device-item--missing {
+  cursor: default;
+  opacity: 0.7;
+  box-shadow: var(--neu-in-sm);
+  color: var(--text-faint);
+}
+
+.device-item--missing:hover {
+  transform: none;
+  box-shadow: var(--neu-in-sm);
+  color: var(--text-dim);
+}
+
+.device-item--missing .icon-circle {
+  color: #e47878;
+  box-shadow: var(--neu-out-xs);
+}
+
+.device-item--missing .icon-circle svg {
+  stroke: #e47878;
+}
+
 /* ─── Control item (middle column) ───────────────────────────────── */
 
 .control-item {
@@ -1341,3 +1366,308 @@ body::-webkit-scrollbar-thumb {
     grid-template-rows: auto;
   }
 }
+
+/* ─── Bug report button (status bar icon) ────────────────────────── */
+
+.bug-report-btn {
+  width: 32px;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 50%;
+  cursor: pointer;
+  background: var(--surface);
+  color: var(--text-faint);
+  box-shadow:
+    var(--neu-out-xs),
+    0 0 12px transparent;
+  transition:
+    color      var(--transition-fast),
+    box-shadow var(--transition-fast),
+    transform  140ms ease;
+  margin-left: auto;  /* pushes to the right of the status toggle */
+}
+
+.bug-report-btn svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+}
+
+.bug-report-btn:hover {
+  color: var(--text);
+  box-shadow:
+    var(--neu-out-sm),
+    0 0 12px var(--accent-glow-sm);
+}
+
+.bug-report-btn:active {
+  transform: scale(0.94);
+  box-shadow:
+    var(--neu-in-sm),
+    0 0 12px transparent;
+}
+
+/* ─── Bug report slide-over panel ────────────────────────────────── */
+
+.bug-report {
+  position: fixed;
+  top: 0;
+  right: 0;
+  width: 480px;
+  max-width: 90vw;
+  height: 100vh;
+  background: var(--surface);
+  box-shadow: -12px 0 32px rgba(0, 0, 0, 0.5);
+  transform: translateX(100%);
+  transition: transform 280ms cubic-bezier(.4, .0, .2, 1);
+  z-index: 950;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.bug-report--open {
+  transform: translateX(0);
+}
+
+.bug-report__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-4) var(--space-5);
+  border-bottom: 1px solid var(--surface-hi);
+  flex-shrink: 0;
+}
+
+.bug-report__title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.bug-report__close {
+  width: 28px;
+  height: 28px;
+  border: none;
+  background: var(--surface);
+  color: var(--text-faint);
+  border-radius: 50%;
+  cursor: pointer;
+  box-shadow: var(--neu-out-xs);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: color var(--transition-fast), box-shadow var(--transition-fast);
+}
+
+.bug-report__close svg {
+  width: 12px;
+  height: 12px;
+  fill: none;
+}
+
+.bug-report__close:hover {
+  color: var(--text);
+  box-shadow: var(--neu-out-sm);
+}
+
+.bug-report__body {
+  padding: var(--space-4) var(--space-5);
+  overflow-y: auto;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.bug-report__intro {
+  font-size: 12px;
+  color: var(--text-dim);
+  line-height: 1.5;
+}
+
+.bug-report__label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.bug-report__desc {
+  font-family: var(--font);
+  font-size: 13px;
+  color: var(--text);
+  background: var(--surface);
+  border: none;
+  border-radius: var(--radius-sm);
+  padding: var(--space-3);
+  resize: vertical;
+  min-height: 80px;
+  box-shadow: var(--neu-in-sm);
+  outline: none;
+}
+
+.bug-report__desc:focus {
+  box-shadow: var(--neu-in-sm), 0 0 0 2px var(--accent-glow);
+}
+
+.bug-report__section-title {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  margin-top: var(--space-2);
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.bug-report__log-path {
+  font-size: 10px;
+  font-weight: 400;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bug-report__info {
+  background: var(--surface);
+  border-radius: var(--radius-sm);
+  padding: var(--space-3);
+  box-shadow: var(--neu-in-sm);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.bug-report__info-row {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-3);
+  font-size: 12px;
+}
+
+.bug-report__info-k {
+  color: var(--text-faint);
+  font-weight: 500;
+}
+
+.bug-report__info-v {
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  text-align: right;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.bug-report__info-err {
+  color: #e47878;
+  font-size: 12px;
+}
+
+.bug-report__skeleton {
+  height: 80px;
+  background: linear-gradient(90deg, var(--surface-deep) 25%, var(--surface-hi) 50%, var(--surface-deep) 75%);
+  background-size: 400px 100%;
+  animation: shimmer 1.6s ease-in-out infinite;
+  border-radius: var(--radius-sm);
+}
+
+.bug-report__log {
+  margin: 0;
+  padding: var(--space-3);
+  background: var(--surface);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--neu-in-sm);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-dim);
+  max-height: 280px;
+  overflow: auto;
+  white-space: pre;
+  word-break: normal;
+  user-select: text;
+}
+
+.bug-report__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+  margin-top: var(--space-2);
+}
+
+.bug-report__btn {
+  border: none;
+  border-radius: var(--radius-pill);
+  background: var(--surface);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 12px;
+  font-weight: 600;
+  padding: 8px 18px;
+  cursor: pointer;
+  box-shadow: var(--neu-out-sm);
+  transition: color var(--transition-fast), box-shadow var(--transition-fast), transform 140ms ease;
+}
+
+.bug-report__btn:hover {
+  color: var(--text-accent);
+  box-shadow: var(--neu-out-sm), 0 0 14px var(--accent-glow-sm);
+}
+
+.bug-report__btn:active {
+  transform: scale(0.97);
+  box-shadow: var(--neu-in-sm);
+}
+
+.bug-report__btn--primary {
+  color: var(--text-accent);
+}
+
+.bug-report__copied {
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+.bug-report__copied--ok    { color: #8ad18a; }
+.bug-report__copied--err   { color: #e47878; }
+
+.bug-report__hint {
+  font-size: 11px;
+  color: var(--text-faint);
+  line-height: 1.5;
+}
+
+.bug-report__url {
+  font-family: var(--font-mono);
+  color: var(--text-dim);
+}
+
+/* ─── First-run install wizard fix (Wave 1 follow-up) ─────────────── */
+/*
+ * The install wizard message includes \n\n separators between the
+ * explanation and the install command. textContent preserves the \n
+ * characters but block-rendered text collapses them unless white-space
+ * permits line breaks. Without this, the wizard renders as one run-on
+ * paragraph and the install command isn't visually separated. This
+ * rule overrides the earlier .daemon-overlay__detail declaration via
+ * cascade order — kept here so the Wave-1 block above stays untouched.
+ */
+.daemon-overlay__detail {
+  white-space: pre-wrap;
+}
+

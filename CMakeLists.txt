@@ -124,3 +124,32 @@ option(LOGINEXT_NATIVE "Use -march=native (non-portable binary)" ON)
 if(LOGINEXT_NATIVE)
     target_compile_options(loginext PRIVATE -march=native)
 endif()
+
+# ──────────────────────────────────────────────────────────────────────
+# Unit tests — opt-in (-DBUILD_TESTS=ON).
+#
+# GoogleTest is fetched via FetchContent at configure time. We pin to a
+# specific tagged release so a future GoogleTest API break doesn't
+# silently break our build; bump the GIT_TAG when intentionally upgrading.
+#
+# The test target is independent of the production `loginext` binary —
+# GoogleTest's symbols never make it into the shipping daemon. Tests link
+# against the same source files (or a static helper lib if the test set
+# grows), which keeps the test target tracking the real implementation.
+# ──────────────────────────────────────────────────────────────────────
+option(BUILD_TESTS "Build unit tests (downloads GoogleTest)" OFF)
+
+if(BUILD_TESTS)
+    include(FetchContent)
+    FetchContent_Declare(
+        googletest
+        GIT_REPOSITORY https://github.com/google/googletest.git
+        GIT_TAG        v1.14.0
+    )
+    # Don't install GoogleTest system-wide via `cmake --install`.
+    set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
+    FetchContent_MakeAvailable(googletest)
+
+    enable_testing()
+    add_subdirectory(tests)
+endif()

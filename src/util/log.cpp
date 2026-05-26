@@ -79,6 +79,41 @@ void chown_to_invoking_user(const char* path) noexcept {
     [[maybe_unused]] int r = chown(path, uid, gid);
 }
 
+// Single-level log rotation. If the existing log file is larger than
+// kRotateThreshold, rename it to `<path>.1` (overwriting any existing
+// .1 file) before re-opening. We deliberately stay at one rotation
+// level — bug reports use only the last session anyway, and adding
+// more would just clutter $XDG_STATE_HOME without diagnostic value.
+//
+// Best-effort: any error here is logged to stderr and ignored — the
+// daemon continues with the original (now-large) log. Better to have
+// a bloated log than no log.
+constexpr off_t kRotateThreshold = 2 * 1024 * 1024;  // 2 MiB
+
+void maybe_rotate_log(const char* path) noexcept {
+    struct stat st{};
+    if (::stat(path, &st) != 0) return;          // missing — nothing to rotate
+    if (st.st_size < kRotateThreshold) return;   // within budget
+
+    char rotated[kPathCap];
+    int n = std::snprintf(rotated, sizeof(rotated), "%s.1", path);
+    if (n <= 0 || static_cast<size_t>(n) >= sizeof(rotated)) return;
+
+    // Remove an older .1 if it exists. unlink is idempotent — ignore
+    // ENOENT. Other errors fall through to rename which will then
+    // overwrite via its own semantics.
+    (void)::unlink(rotated);
+
+    if (::rename(path, rotated) != 0) {
+        std::fprintf(stderr, "[loginext] log: rotate %s → %s failed: %s\n",
+                     path, rotated, std::strerror(errno));
+        return;
+    }
+    chown_to_invoking_user(rotated);
+    std::fprintf(stderr, "[loginext] log: rotated %s → %s (was %lld bytes)\n",
+                 path, rotated, static_cast<long long>(st.st_size));
+}
+
 const char* level_tag(LogLevel l) noexcept {
     switch (l) {
         case LogLevel::Trace: return "TRC";
@@ -86,6 +121,24 @@ const char* level_tag(LogLevel l) noexcept {
         case LogLevel::Info:  return "INF";
         case LogLevel::Warn:  return "WRN";
         case LogLevel::Error: return "ERR";
+    }
+    return "???";
+}
+
+const char* component_tag(LogComponent c) noexcept {
+    switch (c) {
+        case LogComponent::General:    return "gen";
+        case LogComponent::Core:       return "core";
+        case LogComponent::Ipc:        return "ipc";
+        case LogComponent::Scope:      return "scope";
+        case LogComponent::Heuristics: return "heur";
+        case LogComponent::Preset:     return "preset";
+        case LogComponent::Config:     return "config";
+        case LogComponent::Pacer:      return "pacer";
+        case LogComponent::Kwin:       return "kwin";
+        case LogComponent::AppRules:   return "rules";
+        case LogComponent::Daemon:     return "daemon";
+        case LogComponent::Perf:       return "perf";
     }
     return "???";
 }
@@ -129,6 +182,11 @@ int log_init(const LogConfig& cfg) noexcept {
         return -1;
     }
 
+    // Rotate before opening — keeps the new session's log starting fresh
+    // when the previous one ballooned past the budget. Best-effort; errors
+    // get logged to stderr and we proceed with the original file.
+    maybe_rotate_log(g_path);
+
     g_fd = open(g_path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0640);
     if (g_fd < 0) {
         std::fprintf(stderr, "[loginext] log: open(%s) failed: %s\n",
@@ -138,17 +196,9 @@ int log_init(const LogConfig& cfg) noexcept {
     }
     chown_to_invoking_user(g_path);
 
-    // Boot marker — easy to grep when the user reports "what happened at
-    // 14:32?". Goes to file only; the stderr boot banner lives in main.cpp.
-    char ts[32];
-    format_timestamp(ts, sizeof(ts));
-    char banner[256];
-    int bn = std::snprintf(banner, sizeof(banner),
-                           "%s [INF] === loginext daemon started, pid=%d ===\n",
-                           ts, static_cast<int>(getpid()));
-    if (bn > 0) {
-        [[maybe_unused]] ssize_t w = write(g_fd, banner, static_cast<size_t>(bn));
-    }
+    // The session-start banner is emitted from main() via log_session_marker()
+    // so it can include version + active preset + mode — fields not visible
+    // here at log_init time.
     return 0;
 }
 
@@ -158,7 +208,7 @@ void log_shutdown() noexcept {
         format_timestamp(ts, sizeof(ts));
         char banner[128];
         int bn = std::snprintf(banner, sizeof(banner),
-                               "%s [INF] === loginext daemon stopped ===\n", ts);
+                               "%s [INF] [core] === loginext daemon stopped ===\n", ts);
         if (bn > 0) {
             [[maybe_unused]] ssize_t w = write(g_fd, banner, static_cast<size_t>(bn));
         }
@@ -168,7 +218,10 @@ void log_shutdown() noexcept {
     g_path[0] = '\0';
 }
 
-void log_msg(LogLevel lvl, const char* fmt, ...) noexcept {
+// Internal core of log_msg. Component-aware. va_list-based so both
+// public overloads can dispatch into it after their own va_start.
+static void log_msg_v(LogLevel lvl, LogComponent comp,
+                      const char* fmt, va_list ap) noexcept {
     const bool to_file   = g_cfg.file_enabled  && g_fd >= 0
                         && static_cast<int>(lvl) >= static_cast<int>(g_cfg.file_level);
     const bool to_stderr = g_cfg.stderr_enabled
@@ -178,18 +231,14 @@ void log_msg(LogLevel lvl, const char* fmt, ...) noexcept {
     char ts[32];
     format_timestamp(ts, sizeof(ts));
 
-    // Single render — write the same buffer to both sinks.
     char body[kLineCap];
-    va_list ap;
-    va_start(ap, fmt);
     int blen = std::vsnprintf(body, sizeof(body), fmt, ap);
-    va_end(ap);
     if (blen < 0) return;
     if (static_cast<size_t>(blen) >= sizeof(body)) blen = static_cast<int>(sizeof(body)) - 1;
 
-    char line[kLineCap + 64];
-    int n = std::snprintf(line, sizeof(line), "%s [%s] %s\n",
-                          ts, level_tag(lvl), body);
+    char line[kLineCap + 80];
+    int n = std::snprintf(line, sizeof(line), "%s [%s] [%s] %s\n",
+                          ts, level_tag(lvl), component_tag(comp), body);
     if (n <= 0) return;
     if (static_cast<size_t>(n) >= sizeof(line)) n = static_cast<int>(sizeof(line)) - 1;
 
@@ -198,6 +247,57 @@ void log_msg(LogLevel lvl, const char* fmt, ...) noexcept {
     }
     if (to_stderr) {
         [[maybe_unused]] ssize_t w = write(STDERR_FILENO, line, static_cast<size_t>(n));
+    }
+}
+
+void log_msg(LogLevel lvl, LogComponent comp, const char* fmt, ...) noexcept {
+    va_list ap;
+    va_start(ap, fmt);
+    log_msg_v(lvl, comp, fmt, ap);
+    va_end(ap);
+}
+
+// Backward-compatible overload — defaults to General component.
+void log_msg(LogLevel lvl, const char* fmt, ...) noexcept {
+    va_list ap;
+    va_start(ap, fmt);
+    log_msg_v(lvl, LogComponent::General, fmt, ap);
+    va_end(ap);
+}
+
+void log_session_marker(const char* version,
+                        const char* active_preset,
+                        const char* mode) noexcept {
+    if (g_fd < 0 && !g_cfg.stderr_enabled) return;
+
+    char ts[32];
+    format_timestamp(ts, sizeof(ts));
+
+    // Compose conditionally — nullptr fields are omitted. Stack-only.
+    char banner[kLineCap];
+    int n;
+    const char* v  = version       ? version       : "?";
+    if (active_preset && mode) {
+        n = std::snprintf(banner, sizeof(banner),
+            "%s [INF] [core] === loginext started v=%s pid=%d preset=%s mode=%s ===\n",
+            ts, v, static_cast<int>(getpid()), active_preset, mode);
+    } else if (active_preset) {
+        n = std::snprintf(banner, sizeof(banner),
+            "%s [INF] [core] === loginext started v=%s pid=%d preset=%s ===\n",
+            ts, v, static_cast<int>(getpid()), active_preset);
+    } else {
+        n = std::snprintf(banner, sizeof(banner),
+            "%s [INF] [core] === loginext started v=%s pid=%d ===\n",
+            ts, v, static_cast<int>(getpid()));
+    }
+    if (n <= 0) return;
+    if (static_cast<size_t>(n) >= sizeof(banner)) n = static_cast<int>(sizeof(banner)) - 1;
+
+    if (g_fd >= 0) {
+        [[maybe_unused]] ssize_t w = write(g_fd, banner, static_cast<size_t>(n));
+    }
+    if (g_cfg.stderr_enabled) {
+        [[maybe_unused]] ssize_t w = write(STDERR_FILENO, banner, static_cast<size_t>(n));
     }
 }
 

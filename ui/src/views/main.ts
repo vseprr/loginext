@@ -134,7 +134,38 @@ function showToast(message: string, type: "success" | "error" = "success") {
 
 // ── Apply settings (write config → reload daemon) ─────────────────
 
-async function applyCurrentSettings() {
+// Pending-apply state. When the daemon is OFF, user edits to
+// sensitivity / invert / preset on the GLOBAL context are queued here
+// instead of erroring out with "Reload failed: bad_response". The
+// heartbeat (attachHeartbeat below) flushes the queue the next time it
+// observes the daemon coming online. This is the canonical
+// "configure-while-offline" workflow — the user sets up everything they
+// want, then flips the toggle ON, and the daemon picks up the last
+// snapshot in one IPC round-trip.
+//
+// We only queue GLOBAL settings here. Per-app rules go through the
+// rules module which has its own file-backed flow (the daemon reads
+// app_rules.txt on every reload, so file writes are idempotent — no
+// queueing needed there).
+let pendingGlobalApply = false;
+let lastDaemonOnline = false;          // tracks the heartbeat's observed state
+
+// Allow attachHeartbeat (defined far below) to wire the flush callback
+// without a circular import.
+export function notifyDaemonOnlineChange(online: boolean): void {
+  const wasOnline = lastDaemonOnline;
+  lastDaemonOnline = online;
+  // Rising edge: daemon just came up. Flush any queued global apply
+  // AND any pending per-app rule writes (the rules module handles
+  // its own offline persistence via the file, but the daemon-side
+  // hash table only refreshes on `reload`, so we trigger one here).
+  if (!wasOnline && online && pendingGlobalApply) {
+    pendingGlobalApply = false;
+    void applyCurrentSettings(/* fromQueue= */ true);
+  }
+}
+
+async function applyCurrentSettings(fromQueue: boolean = false) {
   // Hard guard: this function writes settings.json and triggers a
   // daemon reload of the *global* config. It must never run while an
   // app context is active — otherwise sensitivity/invert toggled for
@@ -157,6 +188,22 @@ async function applyCurrentSettings() {
   const invert = currentInvert ?? true;
   const preset = currentActivePreset ?? "tab_nav";
   if (mode === lastAppliedMode && invert === lastAppliedInvert && preset === lastAppliedPreset) return;
+
+  // Daemon-offline path: queue the intent + toast it. We DON'T attempt
+  // the IPC at all here — that would surface a confusing "Reload
+  // failed: bad_response" toast while the user knows full well their
+  // daemon is OFF (they just flipped the toggle, after all). The
+  // pending flag is consulted by attachHeartbeat's rising-edge.
+  //
+  // Exception: if we're being called from the queue flush itself
+  // (fromQueue=true), bypass this check — we already know we observed
+  // a rising edge, so the daemon is definitely online.
+  if (!fromQueue && !lastDaemonOnline) {
+    pendingGlobalApply = true;
+    showToast("Changes queued — will apply when daemon comes online", "success");
+    return;
+  }
+
   applying = true;
   try {
     const result = await ipc.applySettings(mode, invert, preset);
@@ -167,12 +214,17 @@ async function applyCurrentSettings() {
       lastAppliedMode   = mode;
       lastAppliedInvert = invert;
       lastAppliedPreset = preset;
-      showToast("Settings applied ✓", "success");
+      showToast(fromQueue ? "Queued changes applied ✓" : "Settings applied ✓", "success");
     } else {
+      // Real daemon-side error (e.g. invalid preset id). Surface it.
       showToast(`Reload failed: ${result.err}`, "error");
     }
   } catch (e) {
-    showToast(`Error: ${String(e)}`, "error");
+    // IPC threw — most likely the daemon went down between the
+    // heartbeat tick and our request. Re-queue rather than erroring;
+    // the next online edge will retry.
+    pendingGlobalApply = true;
+    showToast(`Daemon unreachable — changes queued (${String(e)})`, "success");
   } finally {
     applying = false;
   }
@@ -190,6 +242,13 @@ export function renderMain(root: HTMLElement): void {
 }
 
 async function fetchInitialState() {
+  // Best-effort: the daemon may be OFF (systemd-disabled), in which case
+  // we keep the defaults baked into the constants at the top of this
+  // file. The right-panel controls still render — they just dispatch a
+  // toast on apply because the IPC will fail then too. Without this
+  // fallback, the user would see the right panel stuck on its initial
+  // pre-paint state until they toggled the daemon on, which is jarring.
+  let loaded = false;
   try {
     const res = await ipc.getSettings();
     if (res.ok) {
@@ -197,17 +256,28 @@ async function fetchInitialState() {
       currentMode = s.mode;
       currentInvert = s.invert_hwheel;
       currentActivePreset = s.active_preset;
-      lastAppliedMode = currentMode;
-      lastAppliedInvert = currentInvert;
-      lastAppliedPreset = currentActivePreset;
-      syncSegmented(currentMode);
-      syncToggle(currentInvert);
-      updatePresetHeader();
-      refreshPresetListHighlight();
+      loaded = true;
     }
   } catch {
-    // Daemon may not be running
+    /* daemon not running — fall through */
   }
+  if (!loaded) {
+    // Static defaults mirror src/config/profile.hpp & config/example.json.
+    currentMode = "medium";
+    currentInvert = true;
+    currentActivePreset = "tab_nav";
+  }
+  lastAppliedMode = currentMode;
+  lastAppliedInvert = currentInvert;
+  lastAppliedPreset = currentActivePreset;
+  // After the fallback branch above, currentMode / currentInvert are
+  // guaranteed non-null. The TS module-level types stay nullable because
+  // they pre-paint as null while this async resolves; assert here to
+  // narrow for syncSegmented / syncToggle.
+  if (currentMode != null) syncSegmented(currentMode);
+  if (currentInvert != null) syncToggle(currentInvert);
+  updatePresetHeader();
+  refreshPresetListHighlight();
 }
 
 // ── Device column (left) ──────────────────────────────────────────
@@ -231,18 +301,65 @@ function deviceColumn(): HTMLElement {
   col.appendChild(c);
 
   void (async () => {
+    // Three-tier device discovery:
+    //   1. Daemon IPC `list_devices` (best — knows what the daemon
+    //      actually grabbed). Only works when daemon is ON.
+    //   2. Tauri-side /proc/bus/input/devices probe (works always —
+    //      catches hardware presence even when daemon is OFF or
+    //      misbehaving).
+    //   3. Static fallback row + warning (no supported device found).
+    //
+    // Without (2), the Devices column either showed real data
+    // (daemon ON) or a hardcoded placeholder claiming an MX Master 3S
+    // was attached even when the receiver was unplugged. (2) closes
+    // that gap so users see the truth: device present → name; absent →
+    // "no supported device detected" warning.
+    list.innerHTML = "";
+    let populated = false;
+
     try {
       const res = await ipc.listDevices();
-      list.innerHTML = "";
       if (res.ok) {
         const data = res as DevicesResponse;
         for (const dev of data.devices) {
           list.appendChild(deviceItem(dev.name, dev.id, true));
         }
+        populated = data.devices.length > 0;
       }
     } catch {
-      list.innerHTML = "";
-      list.appendChild(deviceItem("MX Master 3S", "mx_master_3s", true));
+      /* daemon offline — fall through to Tauri probe */
+    }
+
+    if (!populated) {
+      try {
+        const probe = await ipc.detectDevice();
+        if (probe.ok && probe.found && probe.name && probe.id) {
+          list.appendChild(deviceItem(probe.name, probe.id, true));
+          populated = true;
+        }
+      } catch {
+        /* /proc unreadable — fall through to static */
+      }
+    }
+
+    if (!populated) {
+      // Show a "no device" notice rather than a misleading placeholder.
+      // This is honest: if there's nothing on the USB bus, the user
+      // should know — they probably forgot to plug the Bolt receiver
+      // in, or their udev rules haven't applied yet.
+      const notice = document.createElement("div");
+      notice.className = "device-item device-item--missing";
+      notice.setAttribute("aria-disabled", "true");
+      notice.innerHTML =
+        `<div class="icon-circle"><svg viewBox="0 0 24 24">` +
+        `<circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="1.6"/>` +
+        `<path d="M8 8 L16 16 M16 8 L8 16" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>` +
+        `</svg></div>` +
+        `<div class="device-item__info">` +
+        `<div class="device-item__name">No supported device</div>` +
+        `<div class="device-item__id">Plug in your MX Master 3S Bolt or USB receiver</div>` +
+        `</div>`;
+      list.appendChild(notice);
     }
   })();
 
@@ -298,17 +415,23 @@ function controlColumn(): HTMLElement {
   col.appendChild(c);
 
   void (async () => {
+    // Same dual-failure handling as the devices list above — daemon OFF
+    // shouldn't leave the Controls column empty either.
+    list.innerHTML = "";
+    let populated = false;
     try {
       const res = await ipc.listControls();
-      list.innerHTML = "";
       if (res.ok) {
         const data = res as ControlsResponse;
         for (const ctrl of data.controls) {
           list.appendChild(controlItem(ctrl.name, ctrl.kind, true));
         }
+        populated = data.controls.length > 0;
       }
     } catch {
-      list.innerHTML = "";
+      /* fall through */
+    }
+    if (!populated) {
       list.appendChild(controlItem("Thumb Wheel", "Horizontal wheel", true));
     }
     // After controls render, create the context bar
@@ -444,6 +567,25 @@ function renderContextBar(): void {
 
 async function renderPresetList(): Promise<void> {
   if (!presetListEl) return;
+  // Static fallback — kept in sync with the daemon's preset table at
+  // src/presets/presets.hpp. When the daemon is OFF we still want the
+  // user to be able to browse presets and pick one (the actual apply
+  // is queued via pendingGlobalApply and flushed when the daemon comes
+  // back online).
+  //
+  // NOTE: "none" / passthrough is deliberately NOT in this list. The
+  // canonical way to opt out of any preset is to *deselect* the active
+  // preset by clicking it again — that path sets currentActivePreset
+  // to "none" daemon-side (passthrough behaviour), and the preset list
+  // renders all rows as dimmed/non-selected. Surfacing "none" as a
+  // selectable row was visually redundant and confused users into
+  // thinking they had to pick passthrough explicitly. Daemon-side
+  // "none" still exists as a value — it's just not exposed as an
+  // independent list item.
+  const STATIC_PRESETS: Preset[] = [
+    { id: "tab_nav", name: "Navigate between tabs" },
+    { id: "zoom",    name: "Zoom in / out" },
+  ];
   let presets: Preset[] = [];
   try {
     const res = await ipc.listPresets();
@@ -452,8 +594,14 @@ async function renderPresetList(): Promise<void> {
       presets = data.presets;
     }
   } catch {
-    presets = [{ id: "tab_nav", name: "Navigate between tabs" }];
+    /* fall through */
   }
+  if (presets.length === 0) {
+    presets = STATIC_PRESETS;
+  }
+  // Filter "none" out — see comment above. Daemon still ships it in
+  // list_presets so older UIs work; this UI hides it.
+  presets = presets.filter((p) => p.id !== "none");
 
   presetListEl.innerHTML = "";
   for (const p of presets) {
@@ -736,25 +884,12 @@ function presetColumn(): HTMLElement {
   return col;
 }
 
-// ── Heartbeat + status toggle ─────────────────────────────────────
+// ── Heartbeat + status toggle (systemd-only) ──────────────────────
 
-const HEARTBEAT_OK_MS    = 5_000;
-const HEARTBEAT_MIN_FAIL = 2_000;
-const HEARTBEAT_MAX_FAIL = 30_000;
-const HEARTBEAT_OFF_MS   = 10_000;
-const FORCED_OFF_KEY     = "daemon_forced_off";
-
-function isForcedOff(): boolean {
-  try { return localStorage.getItem(FORCED_OFF_KEY) === "true"; }
-  catch { return false; }
-}
-
-function setForcedOff(value: boolean): void {
-  try {
-    if (value) localStorage.setItem(FORCED_OFF_KEY, "true");
-    else localStorage.removeItem(FORCED_OFF_KEY);
-  } catch { /* private mode / disabled storage */ }
-}
+// Heartbeat polling cadences (systemd-only mode).
+const HEARTBEAT_OK_MS    = 5_000;   // poll while active+enabled
+const HEARTBEAT_OFF_MS   = 10_000;  // poll while disabled (cheap)
+const HEARTBEAT_MIN_FAIL = 2_000;   // backoff floor on systemctl errors
 
 type ButtonState = "online" | "offline" | "pending";
 
@@ -863,13 +998,21 @@ export async function attachAlwaysOnTopPin(pin: HTMLButtonElement): Promise<void
   });
 }
 
-// The toggle's truth source. When the unit file is present, we drive
-// the daemon lifecycle entirely through `systemctl --user enable/disable
-// --now` so the user's intent ("ON should mean: start now AND start at
-// next login") is captured in systemd's autostart graph. When the unit
-// is absent (older install / manual build), we fall back to the legacy
-// spawn-detached + kill_daemon path so the toggle remains functional.
-type LifecycleMode = "systemd" | "spawn";
+// Shown when service_state reports available=false. Reuses the fatal
+// overlay machinery — non-modal styling-wise but blocking semantically:
+// without a systemd unit there is nothing for the toggle to drive, so
+// the user has to install before continuing. The hint command is the
+// resolved absolute path returned by service_install_hint so the user
+// can copy-paste verbatim instead of having to first locate the repo.
+function showInstallWizard(installCmd: string) {
+  showFatalOverlay(
+    "systemd unit not installed",
+    `LogiNext's daemon is managed by systemd-user, but the service unit ` +
+    `file isn't installed yet. Run the installer once to enable daemon ` +
+    `lifecycle management:\n\n${installCmd}\n\nThe UI will pick up the ` +
+    `unit automatically on next launch.`
+  );
+}
 
 export async function attachHeartbeat(bar: HTMLElement): Promise<void> {
   bar.className = "status-bar";
@@ -879,35 +1022,41 @@ export async function attachHeartbeat(bar: HTMLElement): Promise<void> {
 
   let timer: ReturnType<typeof setTimeout> | null = null;
   let busy = false;
-  let mode: LifecycleMode = "spawn";   // resolved on first state probe
-  let failures = 0;                     // only used in spawn mode
+  let unitMissing = false;
 
   const schedule = (ms: number) => {
     if (timer) clearTimeout(timer);
     timer = setTimeout(beat, ms);
   };
 
-  // ── Initial state ──────────────────────────────────────────────────
-  // Source of truth on launch: systemd. Falls back to socket-probe for
-  // hosts without the unit file installed.
+  // ── Initial state probe ───────────────────────────────────────────
   const initialSrv = await ipc.serviceState().catch(() => null);
-  if (initialSrv?.ok && initialSrv.available) {
-    mode = "systemd";
+  if (!initialSrv?.ok) {
+    // systemctl itself failed (no user manager?) — treat as unit missing
+    unitMissing = true;
+  } else if (!initialSrv.available) {
+    unitMissing = true;
+  } else {
     const on = !!(initialSrv.active && initialSrv.enabled);
     status.set(on ? "online" : "offline");
-    // Clear any stale localStorage flag — the systemd path is now
-    // authoritative for intent, so the legacy `daemon_forced_off`
-    // sentinel must not silently override it on the next launch.
-    setForcedOff(false);
-  } else {
-    mode = "spawn";
-    if (isForcedOff()) {
-      status.set("offline");
-      try { await ipc.daemonKill(); } catch { /* best-effort */ }
-    }
+    notifyDaemonOnlineChange(on);
   }
 
-  // ── Click handler ──────────────────────────────────────────────────
+  if (unitMissing) {
+    status.set("offline");
+    status.el.disabled = true;
+    status.el.title = "systemd unit not installed — run install.sh";
+    // Fetch the actual install command path so the wizard is accurate.
+    const hint = await ipc.serviceInstallHint().catch(() => null);
+    const cmd = hint?.ok ? (hint.command ?? "./deploy/install.sh")
+                          : "./deploy/install.sh";
+    showInstallWizard(cmd);
+    // Don't poll heartbeat — there's nothing to poll. The user must
+    // install the unit and relaunch.
+    return;
+  }
+
+  // ── Click handler (systemd-only) ──────────────────────────────────
   status.el.addEventListener("click", async () => {
     if (busy) return;
     busy = true;
@@ -917,54 +1066,24 @@ export async function attachHeartbeat(bar: HTMLElement): Promise<void> {
     status.set("pending");
 
     try {
-      if (mode === "systemd") {
-        const r = goingOffline
-          ? await ipc.serviceDisable()
-          : await ipc.serviceEnable();
-        if (r.ok) {
-          const on = !!(r.active && r.enabled);
-          status.set(on ? "online" : (goingOffline ? "offline" : "pending"));
-          showToast(
-            goingOffline ? "Daemon disabled (won't autostart)" : "Daemon enabled (autostarts at login)",
-            "success",
-          );
-          schedule(on ? HEARTBEAT_OK_MS : HEARTBEAT_OFF_MS);
-        } else {
-          status.set(goingOffline ? "online" : "offline");
-          showToast(`systemctl: ${r.err ?? r.state ?? "failed"}`, "error");
-          schedule(HEARTBEAT_OK_MS);
-        }
+      const r = goingOffline
+        ? await ipc.serviceDisable()
+        : await ipc.serviceEnable();
+      if (r.ok) {
+        const on = !!(r.active && r.enabled);
+        status.set(on ? "online" : (goingOffline ? "offline" : "pending"));
+        notifyDaemonOnlineChange(on);
+        showToast(
+          goingOffline
+            ? "Daemon disabled (won't autostart at login)"
+            : "Daemon enabled (autostarts at login)",
+          "success",
+        );
+        schedule(on ? HEARTBEAT_OK_MS : HEARTBEAT_OFF_MS);
       } else {
-        // Legacy spawn/kill path. Used when systemd is absent.
-        if (goingOffline) {
-          const r = await ipc.daemonKill();
-          if (r.ok) {
-            setForcedOff(true);
-            status.set("offline");
-            showToast("Daemon stopped", "success");
-            failures = 0;
-            schedule(HEARTBEAT_OFF_MS);
-          } else {
-            status.set("online");
-            showToast(`Stop failed: ${r.err ?? r.state}`, "error");
-            schedule(HEARTBEAT_OK_MS);
-          }
-        } else {
-          setForcedOff(false);
-          const r = await ipc.daemonRespawn();
-          applyDaemonStatus(r);
-          if (r.ok) {
-            status.set("online");
-            showToast("Daemon started", "success");
-            failures = 0;
-            schedule(HEARTBEAT_OK_MS);
-          } else {
-            setForcedOff(true);
-            status.set("offline");
-            showToast(`Start failed: ${r.err ?? r.state}`, "error");
-            schedule(HEARTBEAT_OFF_MS);
-          }
-        }
+        status.set(goingOffline ? "online" : "offline");
+        showToast(`systemctl: ${r.err ?? r.state ?? "failed"}`, "error");
+        schedule(HEARTBEAT_OK_MS);
       }
     } catch (e) {
       showToast(`Toggle error: ${String(e)}`, "error");
@@ -974,87 +1093,31 @@ export async function attachHeartbeat(bar: HTMLElement): Promise<void> {
     }
   });
 
-  if (mode === "spawn" && !isForcedOff()) {
-    try {
-      const s = await ipc.daemonStatus();
-      if (!s.ok) applyDaemonStatus(s);
-    } catch { /* heartbeat will own it */ }
-  }
-
-  // ── Heartbeat ───────────────────────────────────────────────────────
-  // systemd mode: re-probe service state at HEARTBEAT_OK_MS / HEARTBEAT_OFF_MS
-  // so an externally-issued `systemctl --user start/stop` is reflected
-  // in the toggle within a few seconds.
-  // spawn mode: original UDS-ping + auto-respawn behaviour, unchanged.
+  // ── Heartbeat ─────────────────────────────────────────────────────
+  // Re-probe systemd state at regular intervals so an externally-issued
+  // `systemctl --user start/stop` is reflected in the toggle within a
+  // few seconds.
   async function beat(): Promise<void> {
     if (busy) { schedule(HEARTBEAT_MIN_FAIL); return; }
 
-    if (mode === "systemd") {
-      const r = await ipc.serviceState().catch(() => null);
-      if (!r?.ok || !r.available) {
-        // Unit disappeared mid-session (rare — package downgrade /
-        // manual unit file removal). Fall back to spawn mode silently.
-        mode = "spawn";
-        schedule(HEARTBEAT_MIN_FAIL);
-        return;
-      }
-      const on = !!(r.active && r.enabled);
-      status.set(on ? "online" : "offline");
-      hideFatalOverlay();
-      schedule(on ? HEARTBEAT_OK_MS : HEARTBEAT_OFF_MS);
-      return;
+    const r = await ipc.serviceState().catch(() => null);
+    if (!r?.ok || !r.available) {
+      // Unit disappeared mid-session (rare — package downgrade, manual
+      // file removal). Lock the toggle and show the install wizard.
+      status.set("offline");
+      status.el.disabled = true;
+      const hint = await ipc.serviceInstallHint().catch(() => null);
+      const cmd = hint?.ok ? (hint.command ?? "./deploy/install.sh")
+                            : "./deploy/install.sh";
+      showInstallWizard(cmd);
+      return; // stop polling
     }
-
-    // ── spawn mode (legacy) ──────────────────────────────────────────
-    if (isForcedOff()) {
-      try {
-        const r = await ipc.ping();
-        status.set(r.ok ? "online" : "offline");
-      } catch {
-        status.set("offline");
-      }
-      schedule(HEARTBEAT_OFF_MS);
-      return;
-    }
-
-    try {
-      const r = await ipc.ping();
-      if (r.ok) {
-        failures = 0;
-        status.set("online");
-        hideFatalOverlay();
-        schedule(HEARTBEAT_OK_MS);
-        return;
-      }
-      failures += 1;
-      status.set("pending");
-    } catch {
-      failures += 1;
-      status.set("pending");
-    }
-
-    if (failures <= 3) {
-      try {
-        const respawn = await ipc.daemonRespawn();
-        applyDaemonStatus(respawn);
-        if (respawn.ok) {
-          failures = 0;
-          status.set("online");
-          schedule(HEARTBEAT_OK_MS);
-          return;
-        }
-      } catch { /* swallow */ }
-    }
-
-    if (failures > 3) status.set("offline");
-
-    const backoff = Math.min(HEARTBEAT_MIN_FAIL << (failures - 1), HEARTBEAT_MAX_FAIL);
-    schedule(backoff);
+    const on = !!(r.active && r.enabled);
+    status.set(on ? "online" : "offline");
+    notifyDaemonOnlineChange(on);
+    hideFatalOverlay();
+    schedule(on ? HEARTBEAT_OK_MS : HEARTBEAT_OFF_MS);
   }
 
-  if (mode === "systemd" || !isForcedOff()) {
-    await beat();
-  } else {
-    schedule(HEARTBEAT_OFF_MS);
-  }
+  await beat();
 }

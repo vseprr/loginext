@@ -24,6 +24,11 @@
 
 namespace {
 
+// Daemon version string baked into the session marker so bug reports
+// trivially identify which build produced a log. Bumped per-release in
+// lockstep with the project version.
+constexpr const char* kLoginextVersion = "1.1.0";
+
 volatile sig_atomic_t  g_stop   = 0;
 volatile sig_atomic_t  g_reload = 0;
 
@@ -221,6 +226,14 @@ int main(int argc, char* argv[]) {
         LX_INFO("log: %s", loginext::util::log_file_path());
     }
 
+    // Session marker — first line of the new log session after rotation,
+    // capturing version + pid + active preset + mode so bug reports can
+    // be triaged from a single grep for "loginext started".
+    loginext::util::log_session_marker(
+        kLoginextVersion,
+        loginext::presets::preset_id_str(app.settings.active_preset),
+        loginext::config::mode_name(app.settings.mode));
+
     // --- Signal setup ---
     struct sigaction sa_stop{};
     sa_stop.sa_handler = signal_stop;
@@ -298,7 +311,7 @@ int main(int argc, char* argv[]) {
         }
     }
     if (!dev.valid()) {
-        LX_ERROR("MX Master 3S not found after retries — check device is paired and /dev/input/event* is readable");
+        LX_ERROR_C(Daemon, "MX Master 3S not found after retries — check device is paired and /dev/input/event* is readable");
         if (ipc_bound) loginext::ipc::shutdown_server(app.ipc);
         loginext::util::log_shutdown();
         return EXIT_FAILURE;
@@ -378,7 +391,7 @@ int main(int argc, char* argv[]) {
         LX_WARN("scope: listener disabled — per-app rules inactive");
     }
 
-    LX_INFO("running — SIGHUP reloads config, SIGTERM/Ctrl+C to stop");
+    LX_INFO_C(Daemon, "running — SIGHUP reloads config, SIGTERM/Ctrl+C to stop");
 
     // --- Hot path (zero heap allocations from here) ---
     if (cli.debug_events) {

@@ -473,6 +473,25 @@ pub fn disable_now() -> Result<(), String> {
     run_systemctl(&["disable", "--now", UNIT_NAME])
 }
 
+/// `systemctl --user start loginext.service` — start without enabling.
+///
+/// Used by the UI for transient state changes that shouldn't alter the
+/// boot-time autostart preference. Also used internally by lib.rs::run()
+/// when the unit is enabled but inactive on launch. Self-heals the unit
+/// body first (same logic as enable_now).
+pub fn start_only() -> Result<(), String> {
+    let healed = heal_unit_if_stale()?;
+    if healed {
+        let _ = run_systemctl(&["daemon-reload"]);
+    }
+    run_systemctl(&["start", UNIT_NAME])
+}
+
+/// `systemctl --user stop loginext.service` — stop without disabling.
+pub fn stop_only() -> Result<(), String> {
+    run_systemctl(&["stop", UNIT_NAME])
+}
+
 /// Proactive heal — runs at UI startup, BEFORE the user has had a chance
 /// to click the toggle. Catches the case the previous heal flow missed:
 /// the user's unit was enabled in a prior session, autostarts at boot,

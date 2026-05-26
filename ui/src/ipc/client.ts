@@ -138,13 +138,27 @@ export async function listAppRules(): Promise<AppRulesResponse | IpcErr> {
 
 // Atomic write + daemon reload. The Rust side rejects entries with
 // reserved characters before the write hits disk.
-export async function saveAppRules(rules: AppRule[]): Promise<IpcResult> {
+// Save rules to disk + ask the daemon to reload. The file write is the
+// load-bearing operation (it's the persistent source of truth); the
+// reload is only needed to refresh the daemon's in-memory hash table.
+// We split the result so the caller can distinguish:
+//   - `ok: true`                  — file written AND daemon reloaded
+//   - `ok: true, reloaded: false` — file written, daemon offline/unreachable
+//   - `ok: false`                 — file write itself failed (real error)
+// The middle case is normal during configure-while-offline: rules
+// persist to disk, and the daemon picks them up automatically on its
+// next start (load_rules runs in main.cpp during init).
+export interface SaveAppRulesResult extends IpcOk {
+  reloaded: boolean;
+}
+export async function saveAppRules(rules: AppRule[]): Promise<SaveAppRulesResult | IpcErr> {
   try {
     await invoke("write_app_rules", { rules });
   } catch (e) {
     return { ok: false, err: `save: ${String(e)}` };
   }
-  return request("reload");
+  const reload = await request("reload");
+  return { ok: true, reloaded: reload.ok };
 }
 
 // Daemon lifecycle envelope returned by the Tauri-side spawn check.
@@ -186,12 +200,15 @@ export interface ServiceState {
   available?: boolean;
   active?: boolean;
   enabled?: boolean;
-  state?: "enabled" | "disabled" | "enable_failed" | "disable_failed";
+  state?: "enabled" | "disabled" | "started" | "stopped" |
+          "enable_failed" | "disable_failed" |
+          "start_failed" | "stop_failed";
   err?: string;
 }
 
 async function invokeService(
-  cmd: "service_state" | "service_enable" | "service_disable",
+  cmd: "service_state" | "service_enable" | "service_disable" |
+       "service_start" | "service_stop",
 ): Promise<ServiceState> {
   const raw = await invoke<string>(cmd);
   try {
@@ -199,6 +216,86 @@ async function invokeService(
   } catch {
     return { ok: false, err: "bad_response" };
   }
+}
+
+// First-run wizard payload — `service_install_hint` returns the absolute
+// path of the canonical install.sh resolved from the UI binary, so the
+// wizard can show the user the exact command to run instead of a generic
+// "./deploy/install.sh" that breaks if they're not in the repo root.
+export interface InstallHintResponse {
+  ok: boolean;
+  command?: string;
+  err?: string;
+}
+
+async function invokeInstallHint(): Promise<InstallHintResponse> {
+  const raw = await invoke<string>("service_install_hint");
+  try { return JSON.parse(raw) as InstallHintResponse; }
+  catch { return { ok: false, err: "bad_response" }; }
+}
+
+export interface DaemonLogResponse {
+  ok: boolean;
+  path?: string;
+  lines?: number;
+  body?: string;
+  err?: string;
+}
+
+export interface SystemInfoResponse {
+  ok: boolean;
+  os?: string;
+  kernel?: string;
+  compositor?: string;
+  session?: string;
+  wayland?: string;
+  loginext_version?: string;
+  service_available?: boolean;
+  service_active?: boolean;
+  service_enabled?: boolean;
+  kwin_focus_bridge?: string;
+  err?: string;
+}
+
+export interface ClipboardResponse {
+  ok: boolean;
+  tool?: string;
+  err?: string;
+}
+
+async function invokeDaemonLog(lines: number): Promise<DaemonLogResponse> {
+  const raw = await invoke<string>("read_daemon_log", { lines });
+  try { return JSON.parse(raw) as DaemonLogResponse; }
+  catch { return { ok: false, err: "bad_response" }; }
+}
+
+async function invokeSystemInfo(): Promise<SystemInfoResponse> {
+  const raw = await invoke<string>("system_info");
+  try { return JSON.parse(raw) as SystemInfoResponse; }
+  catch { return { ok: false, err: "bad_response" }; }
+}
+
+async function invokeClipboard(text: string): Promise<ClipboardResponse> {
+  const raw = await invoke<string>("copy_to_clipboard", { text });
+  try { return JSON.parse(raw) as ClipboardResponse; }
+  catch { return { ok: false, err: "bad_response" }; }
+}
+
+// Daemon-independent Logitech device detection. Reads
+// /proc/bus/input/devices in the Tauri layer so the UI's Devices column
+// can show real hardware state even when the daemon is OFF.
+export interface DetectDeviceResponse {
+  ok: boolean;
+  found?: boolean;
+  name?: string;
+  id?: string;
+  err?: string;
+}
+
+async function invokeDetectDevice(): Promise<DetectDeviceResponse> {
+  const raw = await invoke<string>("detect_logitech_device");
+  try { return JSON.parse(raw) as DetectDeviceResponse; }
+  catch { return { ok: false, err: "bad_response" }; }
 }
 
 export const ipc = {
@@ -221,6 +318,20 @@ export const ipc = {
   serviceState:   () => invokeService("service_state"),
   serviceEnable:  () => invokeService("service_enable"),
   serviceDisable: () => invokeService("service_disable"),
+  serviceStart:   () => invokeService("service_start"),
+  serviceStop:    () => invokeService("service_stop"),
+  // First-run wizard: returns the resolved install.sh path when the unit
+  // isn't installed yet, so the wizard can show the exact command.
+  serviceInstallHint: () => invokeInstallHint(),
+  // Bug-report support: tail the daemon log, probe system info, and
+  // shell out to a clipboard tool. Used by views/bug-report.ts.
+  readDaemonLog:    (lines: number = 100) => invokeDaemonLog(lines),
+  systemInfo:       () => invokeSystemInfo(),
+  copyToClipboard:  (text: string) => invokeClipboard(text),
+  // Daemon-independent Logitech device detection. Reads
+  // /proc/bus/input/devices via Tauri so the Devices column can show
+  // real hardware state even when the daemon is OFF.
+  detectDevice:     () => invokeDetectDevice(),
   // Window-manager: pin the UI above other windows. Used by the
   // header pin button to keep LogiNext visible while the user clicks
   // around their other apps to register per-app rules.

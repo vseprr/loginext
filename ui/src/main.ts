@@ -1,4 +1,5 @@
 import { attachHeartbeat, attachAlwaysOnTopPin, renderMain } from "./views/main";
+import { createBugReportButton } from "./views/bug-report";
 
 const app = document.getElementById("app");
 if (!app) throw new Error("#app mount point missing");
@@ -68,4 +69,5 @@ app.appendChild(shell);
 
 renderMain(main);
 void attachHeartbeat(status);
+status.appendChild(createBugReportButton());
 void attachAlwaysOnTopPin(pin);

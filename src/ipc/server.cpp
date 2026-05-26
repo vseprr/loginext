@@ -127,7 +127,7 @@ int init_server(IpcServer& s) noexcept {
 
     s.listen_fd = socket(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
     if (s.listen_fd < 0) {
-        LX_ERROR("ipc: socket() failed: %s", std::strerror(errno));
+        LX_ERROR_C(Ipc, "socket() failed: %s", std::strerror(errno));
         return -1;
     }
 
@@ -136,7 +136,7 @@ int init_server(IpcServer& s) noexcept {
     std::strncpy(addr.sun_path, s.sock_path, sizeof(addr.sun_path) - 1);
 
     if (bind(s.listen_fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
-        LX_ERROR("ipc: bind(%s) failed: %s", s.sock_path, std::strerror(errno));
+        LX_ERROR_C(Ipc, "bind(%s) failed: %s", s.sock_path, std::strerror(errno));
         close(s.listen_fd);
         s.listen_fd = -1;
         return -1;

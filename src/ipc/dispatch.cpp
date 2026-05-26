@@ -4,6 +4,7 @@
 #include "presets/preset.hpp"
 #include "scope/listener.hpp"
 #include "scope/rules.hpp"
+#include "util/log.hpp"
 
 #include <cstdio>
 #include <cstring>
@@ -217,6 +218,19 @@ int dispatch_with_fd(const char* line, size_t len,
 
     std::string_view cmd = extract_string(sv, "cmd");
     if (cmd.empty())           return write_err(resp, resp_cap, "bad_request");
+
+    // Debug-level audit trail: every dispatched IPC command shows up in the
+    // file log. Bug reports can then answer "what was the daemon asked to
+    // do?" with a single grep. NUL-terminate into a small stack buffer —
+    // the printf "%.*s" form would also work but %s keeps the format string
+    // grep-friendly and matches how other log lines render command names.
+    {
+        char cmd_buf[32];
+        size_t cn = cmd.size() < sizeof(cmd_buf) - 1 ? cmd.size() : sizeof(cmd_buf) - 1;
+        std::memcpy(cmd_buf, cmd.data(), cn);
+        cmd_buf[cn] = '\0';
+        LX_DEBUG_C(Ipc, "command received: %s (fd=%d)", cmd_buf, client_fd);
+    }
 
     if (cmd == "ping")           return handle_ping(resp, resp_cap);
     if (cmd == "get_settings")   return handle_get_settings(resp, resp_cap, *dc->settings);

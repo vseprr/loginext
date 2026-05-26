@@ -524,6 +524,8 @@ fn daemon_status(state: tauri::State<'_, DaemonStartup>) -> String {
     }
 }
 
+// Legacy spawn-mode lifecycle command — retained for diagnostics. The UI's
+// toggle no longer calls this; daemon lifecycle is owned by systemd.
 /// Locate and terminate the running `loginext` daemon. Used by the
 /// "SYSTEM ONLINE/OFFLINE" toggle in the UI to honour explicit user intent
 /// to take the daemon down. SIGTERM first; SIGKILL only if the daemon
@@ -623,6 +625,8 @@ fn service_disable() -> String {
     }
 }
 
+// Legacy spawn-mode lifecycle command — retained for diagnostics. The UI's
+// toggle no longer calls this; daemon lifecycle is owned by systemd.
 /// Re-runs the spawn check on demand. The UI calls this from the status-bar
 /// reconnect path when the heartbeat reports the daemon went away while the
 /// window was open. Cheap when the socket is alive (single connect+close).
@@ -649,6 +653,350 @@ fn daemon_respawn(state: tauri::State<'_, DaemonStartup>) -> String {
     payload
 }
 
+/// `systemctl --user start loginext.service` (no enable). Used internally
+/// by run() when the unit is enabled but not active, and exposed to the UI
+/// for transient start/stop without touching autostart state. Heals the
+/// unit body first if it's stale (same logic as service_enable).
+#[tauri::command]
+fn service_start() -> String {
+    match service::start_only() {
+        Ok(()) => {
+            let s = service::query_state();
+            format!(
+                r#"{{"ok":true,"state":"started","available":{a},"active":{ac},"enabled":{en}}}"#,
+                a = s.available, ac = s.active, en = s.enabled,
+            )
+        }
+        Err(reason) => {
+            let e = reason.replace('\\', "\\\\").replace('"', "\\\"");
+            format!(r#"{{"ok":false,"state":"start_failed","err":"{e}"}}"#)
+        }
+    }
+}
+
+/// `systemctl --user stop loginext.service` (no disable). Stops without
+/// removing the autostart symlink — useful for "pause this session" without
+/// losing the boot-time autostart setting.
+#[tauri::command]
+fn service_stop() -> String {
+    match service::stop_only() {
+        Ok(()) => {
+            let s = service::query_state();
+            format!(
+                r#"{{"ok":true,"state":"stopped","available":{a},"active":{ac},"enabled":{en}}}"#,
+                a = s.available, ac = s.active, en = s.enabled,
+            )
+        }
+        Err(reason) => {
+            let e = reason.replace('\\', "\\\\").replace('"', "\\\"");
+            format!(r#"{{"ok":false,"state":"stop_failed","err":"{e}"}}"#)
+        }
+    }
+}
+
+/// Returns a JSON envelope describing how to install the systemd unit.
+/// Called by the UI's first-run wizard when service_state reports
+/// available=false. The shell command is the canonical install.sh path
+/// at the absolute repo location resolvable from the UI binary; if we
+/// can't resolve it, fall back to a generic "run ./deploy/install.sh".
+#[tauri::command]
+fn service_install_hint() -> String {
+    // Try to resolve the repo root by walking up from the UI exe.
+    // Same algorithm as daemon::resolve_daemon_binary's dev-workflow
+    // branch — looks for a deploy/install.sh sibling.
+    let path = std::env::current_exe()
+        .ok()
+        .and_then(|exe| {
+            let mut p = exe.clone();
+            for _ in 0..7 {
+                if let Some(parent) = p.parent() {
+                    let candidate = parent.join("deploy/install.sh");
+                    if candidate.is_file() {
+                        return Some(candidate);
+                    }
+                    p = parent.to_path_buf();
+                } else {
+                    break;
+                }
+            }
+            None
+        });
+
+    let cmd = path
+        .as_ref()
+        .map(|p| format!("bash {}", p.display()))
+        .unwrap_or_else(|| "./deploy/install.sh".to_string());
+    let escaped = cmd.replace('\\', "\\\\").replace('"', "\\\"");
+    format!(r#"{{"ok":true,"command":"{escaped}"}}"#)
+}
+
+/// Read the last `lines` lines of the daemon log file (default 100 if 0
+/// passed). The log lives at `$XDG_STATE_HOME/loginext/daemon.log`
+/// (fallback: `$HOME/.local/state/loginext/daemon.log`). Returns a JSON
+/// envelope. The body is escaped so it can be safely embedded in another
+/// JSON document for clipboard-copy.
+///
+/// Tail-from-end implementation: open the file, seek to end, read backwards
+/// until N newlines counted, then return that suffix. Bounded by a max
+/// of 64 KiB even when the user asks for many lines — bug reports stay
+/// readable on GitHub Issues.
+#[tauri::command]
+fn read_daemon_log(lines: u32) -> String {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let n = if lines == 0 { 100 } else { lines.min(2000) };
+    let path = match resolve_daemon_log_path() {
+        Some(p) => p,
+        None => {
+            return r#"{"ok":false,"err":"could not resolve daemon log path"}"#.to_string();
+        }
+    };
+
+    let mut file = match std::fs::File::open(&path) {
+        Ok(f) => f,
+        Err(e) => {
+            let msg = format!(r#"could not open {}: {}"#, path.display(), e);
+            let esc = msg.replace('\\', "\\\\").replace('"', "\\\"");
+            return format!(r#"{{"ok":false,"err":"{esc}"}}"#);
+        }
+    };
+
+    // Tail-from-end: read up to 64 KiB from end, then keep only the last
+    // `n` lines. Avoids loading a multi-MB log into memory.
+    const MAX_BYTES: u64 = 64 * 1024;
+    let len = file.seek(SeekFrom::End(0)).unwrap_or(0);
+    let start = len.saturating_sub(MAX_BYTES);
+    let _ = file.seek(SeekFrom::Start(start));
+
+    let mut buf = String::new();
+    if file.read_to_string(&mut buf).is_err() {
+        // Log may contain non-UTF8 bytes — read as bytes + lossy convert.
+        let _ = file.seek(SeekFrom::Start(start));
+        let mut bytes = Vec::new();
+        let _ = file.read_to_end(&mut bytes);
+        buf = String::from_utf8_lossy(&bytes).into_owned();
+    }
+
+    // Trim to last N lines.
+    let lines_vec: Vec<&str> = buf.lines().collect();
+    let take_from = lines_vec.len().saturating_sub(n as usize);
+    let tail = lines_vec[take_from..].join("\n");
+
+    let esc = tail.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n");
+    format!(r#"{{"ok":true,"path":"{}","lines":{},"body":"{}"}}"#,
+        path.display().to_string().replace('\\', "\\\\").replace('"', "\\\""),
+        (n as usize).min(lines_vec.len()),
+        esc,
+    )
+}
+
+fn resolve_daemon_log_path() -> Option<std::path::PathBuf> {
+    use std::path::PathBuf;
+    if let Ok(xdg) = std::env::var("XDG_STATE_HOME") {
+        if !xdg.is_empty() {
+            return Some(PathBuf::from(format!("{xdg}/loginext/daemon.log")));
+        }
+    }
+    let home = std::env::var("HOME").ok()?;
+    Some(PathBuf::from(format!("{home}/.local/state/loginext/daemon.log")))
+}
+
+/// Returns a JSON envelope describing the host environment relevant to a
+/// LogiNext bug report: OS, kernel, compositor, loginext version, systemd
+/// service state, KWin focus-bridge enablement bit. Each field is a
+/// best-effort probe — if a tool isn't installed (kreadconfig6, uname),
+/// the field is reported as `unknown` rather than failing the whole
+/// response.
+#[tauri::command]
+fn system_info() -> String {
+    fn run(tool: &str, args: &[&str]) -> Option<String> {
+        let out = Command::new(tool)
+            .args(args)
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+            .ok()?;
+        let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if s.is_empty() { None } else { Some(s) }
+    }
+
+    let kernel = run("uname", &["-r"]).unwrap_or_else(|| "unknown".into());
+    let os = std::fs::read_to_string("/etc/os-release").ok()
+        .and_then(|s| s.lines()
+            .find(|l| l.starts_with("PRETTY_NAME="))
+            .map(|l| l.trim_start_matches("PRETTY_NAME=")
+                     .trim_matches('"').to_string()))
+        .unwrap_or_else(|| "unknown".into());
+    let xdg_session = std::env::var("XDG_SESSION_TYPE").unwrap_or_else(|_| "unknown".into());
+    let compositor = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_else(|_| "unknown".into());
+    let wayland = if std::env::var("WAYLAND_DISPLAY").is_ok() { "yes" } else { "no" };
+
+    let svc = service::query_state();
+
+    // KWin focus-bridge enablement bit. Returns "true" / "false" / "unknown".
+    let kwin_bridge = ["kreadconfig6", "kreadconfig5"].iter().find_map(|tool| {
+        run(tool, &["--file", "kwinrc", "--group", "Plugins",
+                    "--key", "loginext-focusEnabled"])
+    }).unwrap_or_else(|| "unknown".into());
+
+    // Daemon binary version — for now hard-coded to match the C++
+    // LOGINEXT_VERSION constant set in main.cpp. A future wave can
+    // wire this through CMake configure_file so the two can't drift.
+    let daemon_version = "1.1.0";
+
+    let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
+    format!(
+        r#"{{"ok":true,"os":"{}","kernel":"{}","compositor":"{}","session":"{}","wayland":"{}","loginext_version":"{}","service_available":{},"service_active":{},"service_enabled":{},"kwin_focus_bridge":"{}"}}"#,
+        esc(&os),
+        esc(&kernel),
+        esc(&compositor),
+        esc(&xdg_session),
+        wayland,
+        daemon_version,
+        svc.available,
+        svc.active,
+        svc.enabled,
+        esc(&kwin_bridge),
+    )
+}
+
+/// Write the supplied text to the system clipboard. Tries `wl-copy` first
+/// (Wayland), then `xclip`, then `xsel`. Returns a JSON envelope. We
+/// shell out rather than depend on Tauri's clipboard plugin to keep this
+/// shippable inside the existing Tauri 2.x setup without adding crates.
+#[tauri::command]
+fn copy_to_clipboard(text: String) -> String {
+    use std::io::Write;
+
+    let tools: &[(&str, &[&str])] = &[
+        ("wl-copy", &[]),
+        ("xclip",   &["-selection", "clipboard"]),
+        ("xsel",    &["--clipboard", "--input"]),
+    ];
+
+    for (tool, args) in tools {
+        let mut child = match Command::new(tool)
+            .args(*args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+        {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        if let Some(stdin) = child.stdin.as_mut() {
+            if stdin.write_all(text.as_bytes()).is_err() {
+                continue;
+            }
+        }
+        if child.wait().map(|s| s.success()).unwrap_or(false) {
+            return format!(r#"{{"ok":true,"tool":"{}"}}"#, tool);
+        }
+    }
+    r#"{"ok":false,"err":"no clipboard tool available (install wl-clipboard, xclip, or xsel)"}"#.to_string()
+}
+
+/// Probe `/proc/bus/input/devices` for a supported Logitech device. Used by
+/// the UI's Devices column when the daemon is OFF — the daemon-side
+/// `list_devices` IPC isn't available, but the UI should still tell the
+/// user whether their hardware is plugged in (rather than always showing
+/// a hard-coded "MX Master 3S" placeholder that's wrong on systems where
+/// the device isn't actually present).
+///
+/// `/proc/bus/input/devices` is the kernel-exported, world-readable
+/// canonical source. Each block looks like:
+///
+///     I: Bus=0003 Vendor=046d Product=c548 Version=0111
+///     N: Name="Logitech USB Receiver Mouse"
+///     ...
+///
+/// We match Logitech (0x046d) + one of the known MX Master 3S
+/// product ids (0xb034 Bolt, 0xc548 USB) and return the human Name
+/// string. Returns `{"ok":true,"found":false}` when no supported device
+/// is enumerated — UI surfaces this as a "no device detected" warning.
+#[tauri::command]
+fn detect_logitech_device() -> String {
+    // Known supported product ids — keep in lockstep with
+    // src/core/device.cpp and deploy/udev/99-loginext.rules.
+    const LOGITECH_VENDOR: &str = "046d";
+    // Add more product ids here as Phase 3 lands more devices.
+    const SUPPORTED_PRODUCTS: &[&str] = &["b034", "c548"];
+
+    let body = match std::fs::read_to_string("/proc/bus/input/devices") {
+        Ok(s) => s,
+        Err(e) => {
+            let esc = format!("{e}").replace('\\', "\\\\").replace('"', "\\\"");
+            return format!(r#"{{"ok":false,"err":"{esc}"}}"#);
+        }
+    };
+
+    // Parser: block delimiter is a blank line. Within a block, lines
+    // start with `I:` / `N:` / `H:` / etc. We need I (vendor/product)
+    // and N (name). No heap allocation per line — split + match.
+    let mut current_vendor   = String::new();
+    let mut current_product  = String::new();
+    let mut current_name     = String::new();
+    let mut found_name: Option<String> = None;
+    let mut found_vendor_product: Option<String> = None;
+
+    fn flush(
+        v: &str, p: &str, n: &str,
+        found_name: &mut Option<String>,
+        found_vp: &mut Option<String>,
+    ) {
+        if v.eq_ignore_ascii_case(LOGITECH_VENDOR)
+            && SUPPORTED_PRODUCTS.iter().any(|sp| sp.eq_ignore_ascii_case(p))
+            && !n.is_empty()
+        {
+            *found_name = Some(n.to_string());
+            *found_vp = Some(format!("{}:{}", v, p));
+        }
+    }
+
+    for raw in body.lines() {
+        if raw.is_empty() {
+            flush(&current_vendor, &current_product, &current_name,
+                  &mut found_name, &mut found_vendor_product);
+            if found_name.is_some() {
+                break;
+            }
+            current_vendor.clear();
+            current_product.clear();
+            current_name.clear();
+            continue;
+        }
+        if let Some(rest) = raw.strip_prefix("I: ") {
+            for tok in rest.split_whitespace() {
+                if let Some(v) = tok.strip_prefix("Vendor=") {
+                    current_vendor = v.to_string();
+                } else if let Some(p) = tok.strip_prefix("Product=") {
+                    current_product = p.to_string();
+                }
+            }
+        } else if let Some(rest) = raw.strip_prefix("N: Name=") {
+            current_name = rest.trim_matches('"').to_string();
+        }
+    }
+    // Tail block (file doesn't end with a blank line in some kernels)
+    if found_name.is_none() {
+        flush(&current_vendor, &current_product, &current_name,
+              &mut found_name, &mut found_vendor_product);
+    }
+
+    match (found_name, found_vendor_product) {
+        (Some(name), Some(vp)) => {
+            let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
+            format!(
+                r#"{{"ok":true,"found":true,"name":"{}","id":"{}"}}"#,
+                esc(&name),
+                esc(&vp),
+            )
+        }
+        _ => r#"{"ok":true,"found":false}"#.to_string(),
+    }
+}
+
 /// Wraps the initial spawn outcome so it lives for the duration of the Tauri
 /// app and can be queried by the `daemon_status` command. Updated whenever
 /// `daemon_respawn` runs.
@@ -656,49 +1004,39 @@ struct DaemonStartup(Mutex<daemon::SpawnOutcome>);
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // Apply WebKitGTK Wayland workarounds first — these MUST land before
-    // the Tauri runtime triggers any GTK initialisation, otherwise WebKit
-    // has already chosen a renderer and the env var is read too late.
     apply_webkit_wayland_workarounds();
 
-    // Make sure the KDE focus bridge is enabled in the user's kwinrc.
-    // This is the producer side of the per-app rule pipeline, and
-    // pacman's post-install hook can't reach a user's $HOME, so without
-    // this step a fresh package install leaves per-app rules silently
-    // dead until the user runs `kwriteconfig6` by hand. Cheap (a couple
-    // of subprocess calls), idempotent, and gated on KDE.
-    ensure_kwin_script_enabled();
-
-    // Self-heal the systemd user unit at every UI launch. This catches
-    // the boot-time auto-restart loop the original heal-on-toggle path
-    // could not: when the unit is enabled+failing on every reboot, the
-    // toggle reads "ON" (is-active=activating), the user never clicks
-    // it, and the heal never runs. Now the heal runs unconditionally at
-    // startup so a buggy hardening directive (e.g. v1's missing `-`
-    // prefix on ReadWritePaths that 226/NAMESPACE'd at boot) is fixed
-    // the next time the user opens the UI, with no manual systemctl
-    // commands required. Cheap when there's nothing to fix.
-    service::heal_at_startup();
-
-    // Decide the lifecycle path. When systemd is managing the daemon
-    // (unit is installed and either active or enabled), we MUST NOT
-    // spawn-detach a competing instance: both processes would race for
-    // `EVIOCGRAB` on the mouse and the loser would spin in a restart
-    // loop until the `[Unit] StartLimitBurst` cap kicks in (previous
-    // regression: ~90 restart attempts before the guard engaged,
-    // because the Start-limit directives were mis-placed under
-    // [Service] and silently ignored — fixed separately in
-    // TEMPLATE_VERSION=5). When systemd isn't in play (unit absent,
-    // e.g. fresh cmake-only build), fall back to the legacy
-    // spawn-detached path so the toggle remains functional.
+    // Probe systemd state FIRST. KWin script + heal only run when the
+    // daemon is actually meant to be active (enabled or already active).
+    // Doing them unconditionally was the root cause of "features keep
+    // running while toggle is OFF" — KWin script enablement triggers
+    // active-window events that the running daemon processes.
     let svc = service::query_state();
-    let initial = if svc.available && (svc.active || svc.enabled) {
-        // Up to 5 s is enough for the daemon to bind the socket after
-        // a fresh `systemctl --user start` or the heal-triggered
-        // try-restart that heal_at_startup() may have just issued.
+
+    let kwin_and_heal_should_run = svc.available && (svc.active || svc.enabled);
+    if kwin_and_heal_should_run {
+        ensure_kwin_script_enabled();
+        service::heal_at_startup();
+    }
+
+    let initial = if !svc.available {
+        // Unit not installed. UI will show first-run wizard.
+        // Do NOT spawn-detach — that was the legacy path producing
+        // the two-daemon EVIOCGRAB race when the user later toggles ON.
+        daemon::SpawnOutcome::BinaryNotFound
+    } else if svc.active {
+        // Already running under systemd. Just wait for the socket.
+        daemon::wait_for_running(Duration::from_secs(5))
+    } else if svc.enabled {
+        // Enabled but not active (rare — maybe crashed). Ask systemd
+        // to start it; do NOT spawn-detach.
+        let _ = service::start_only();
         daemon::wait_for_running(Duration::from_secs(5))
     } else {
-        daemon::ensure_running()
+        // Disabled. User explicitly turned it OFF. Don't start
+        // anything. Toggle will read OFF and the UI works in
+        // "configure but daemon not running" mode.
+        daemon::SpawnOutcome::Timeout
     };
 
     eprintln!(
@@ -714,17 +1052,25 @@ pub fn run() {
             read_app_rules,
             write_app_rules,
             daemon_status,
+            // daemon_respawn and kill_daemon are kept for backward
+            // compatibility but no longer called from the production UI.
+            // They will be removed in a future major version.
             daemon_respawn,
             kill_daemon,
             service_state,
             service_enable,
             service_disable,
+            service_start,
+            service_stop,
+            service_install_hint,
             set_always_on_top,
+            read_daemon_log,
+            system_info,
+            copy_to_clipboard,
+            detect_logitech_device,
         ])
         .run(tauri::generate_context!());
 
-    // Don't panic on Tauri runtime errors — log + exit non-zero so a launcher
-    // surfaces the failure cleanly rather than leaving a SIGABRT corefile.
     if let Err(e) = result {
         eprintln!("[loginext-ui] tauri runtime failed: {e}");
         std::process::exit(1);

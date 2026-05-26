@@ -156,7 +156,7 @@ bool load_rules(const std::string& path, RuleTable& out) noexcept {
         }
     }
 
-    LX_INFO("app_rules: loaded %u rule(s) from %s", out.count, path.c_str());
+    LX_INFO_C(AppRules, "loaded %u rule(s) from %s", out.count, path.c_str());
     return ok;
 }
 

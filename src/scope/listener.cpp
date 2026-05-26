@@ -293,7 +293,7 @@ bool kwin_dbus_loop(Listener* l) noexcept {
         return false;
     }
 
-    LX_INFO("scope: kwin-dbus active-window detector online "
+    LX_INFO_C(Scope, "kwin-dbus active-window detector online "
             "(awaiting KWin script publish on %s)", kwin_dbus_service);
 
     // ── Cold-boot bootstrap: ask KWin to publish the active window NOW ──
@@ -965,9 +965,9 @@ void publish_and_log(Listener* l, uint32_t h, const char* src,
     uint32_t prev = l->active_app_hash.exchange(h, std::memory_order_relaxed);
     if (prev == h) return;  // No change → no log spam.
     if (h == 0) {
-        LX_INFO("scope: focus → (none) [%s]", src);
+        LX_INFO_C(Scope, "focus → (none) [%s]", src);
     } else {
-        LX_INFO("scope: focus → instance='%s' class='%s' hash=0x%08x [%s] "
+        LX_INFO_C(Scope, "focus → instance='%s' class='%s' hash=0x%08x [%s] "
                 "(rule key after lower-case: '%s')",
                 instance ? instance : "",
                 klass    ? klass    : "",
